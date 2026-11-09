@@ -4,6 +4,9 @@ Unofficial: not made or endorsed by the cadmpeg project. cadmpeg is Apache-2.0; 
 
 The complete [cadmpeg](https://github.com/cadmpeg/cadmpeg) CLI compiled to WebAssembly (WASI), with a small JS wrapper that runs it in the browser or in Node over an in-memory directory. Every command and flag works as in the native tool: `convert`, `inspect`, `check`, `measure`, `diff`, `dump`, `query`, `dialects`, `repro`.
 
+> **Note**: ⚠ 100% VIBE CODED ⚠
+
+
 ## Use
 
 ```js
