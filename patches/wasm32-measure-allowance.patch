@@ -1,0 +1,24 @@
+diff --git a/crates/cadmpeg-measure/src/budget.rs b/crates/cadmpeg-measure/src/budget.rs
+index d70afba..9d992c7 100644
+--- a/crates/cadmpeg-measure/src/budget.rs
++++ b/crates/cadmpeg-measure/src/budget.rs
+@@ -83,8 +83,9 @@ pub enum WorkProfile {
+ }
+ 
+ impl WorkProfile {
+-    /// The pass allowance for a document of `items` faces and edges, absent
+-    /// when it does not fit a `usize`.
++    /// The pass allowance for a document of `items` faces and edges. On a
++    /// 64-bit target it is absent when it does not fit a `usize`; on a
++    /// narrower target, such as wasm32, it saturates at `usize::MAX`.
+     #[must_use]
+     pub fn pass_allowance(self, items: usize) -> Option<usize> {
+         let per_item = match self {
+@@ -93,6 +94,7 @@ impl WorkProfile {
+         };
+         items
+             .checked_mul(per_item)
++            .or((usize::BITS < 64).then_some(usize::MAX))
+             .map(|scaled| scaled.max(MEASURE_PASS_WORK_FLOOR))
+     }
+ 
