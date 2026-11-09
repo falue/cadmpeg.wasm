@@ -1,11 +1,13 @@
-# cadmpeg-web
+# cadmpeg.wasm
+
+Unofficial: not made or endorsed by the cadmpeg project. cadmpeg is Apache-2.0; its license is in [LICENSE-cadmpeg](LICENSE-cadmpeg).
 
 The complete [cadmpeg](https://github.com/cadmpeg/cadmpeg) CLI compiled to WebAssembly (WASI), with a small JS wrapper that runs it in the browser or in Node over an in-memory directory. Every command and flag works as in the native tool: `convert`, `inspect`, `check`, `measure`, `diff`, `dump`, `query`, `dialects`, `repro`.
 
 ## Use
 
 ```js
-import { cadmpeg, convert } from 'cadmpeg-web';
+import { cadmpeg, convert } from 'cadmpeg.wasm';
 
 // Native CAD file to STEP, plus cadmpeg's JSON report (decode, check, export).
 const { data, report } = await convert(file.name, new Uint8Array(await file.arrayBuffer()), 'step');

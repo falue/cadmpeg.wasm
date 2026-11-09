@@ -1,10 +1,10 @@
 {
-  "name": "cadmpeg-web",
+  "name": "cadmpeg.wasm",
   "version": "0.1.0",
   "description": "The cadmpeg CLI as WebAssembly: inspect and convert native CAD files in the browser.",
   "type": "module",
   "main": "cadmpeg.js",
-  "files": ["cadmpeg.js", "cadmpeg.wasm"],
+  "files": ["cadmpeg.js", "cadmpeg.wasm", "LICENSE-cadmpeg"],
   "scripts": {
     "build": "./build.sh",
     "test": "node test/smoke.mjs"
