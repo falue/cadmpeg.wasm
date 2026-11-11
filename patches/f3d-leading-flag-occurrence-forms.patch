@@ -1,0 +1,492 @@
+diff --git a/crates/cadmpeg-codec-f3d/src/design/decode/components.rs b/crates/cadmpeg-codec-f3d/src/design/decode/components.rs
+index c57e780..3081129 100644
+--- a/crates/cadmpeg-codec-f3d/src/design/decode/components.rs
++++ b/crates/cadmpeg-codec-f3d/src/design/decode/components.rs
+@@ -560,6 +560,49 @@ pub(crate) fn superseded_occurrences_loss(
+ 
+ /// Most attributes an attributed occurrence frame can carry.
+ const MAX_OCCURRENCE_ATTRIBUTES: u32 = 16;
++
++/// The `count` occurrence attributes stored from `at`, and their end.
++fn occurrence_attributes(
++    frame: &[u8],
++    mut at: usize,
++    count: u32,
++) -> Option<(
++    Vec<crate::records::feature::assembly_features::DesignOccurrenceAttribute>,
++    usize,
++)> {
++    use crate::records::feature::assembly_features::{
++        DesignOccurrenceAttribute, DesignOccurrenceAttributeValue,
++    };
++    if count > MAX_OCCURRENCE_ATTRIBUTES {
++        return None;
++    }
++    let mut attributes = Vec::new();
++    for _ in 0..count {
++        let (name, after_name) =
++            lp_ascii_filtered_view(frame, at, 1..=64, u8::is_ascii_alphanumeric)?;
++        let (kind, after_kind) =
++            lp_ascii_filtered_view(frame, after_name, 1..=64, u8::is_ascii_alphanumeric)?;
++        let (value, after_value) = match kind {
++            "IntrinsicMetaTypebool" => match frame.get(after_kind)? {
++                0 => (DesignOccurrenceAttributeValue::Bool(false), after_kind + 1),
++                1 => (DesignOccurrenceAttributeValue::Bool(true), after_kind + 1),
++                _ => return None,
++            },
++            "IntrinsicMetaTypeHString" => {
++                let (text, after_text) = lp_utf16_bounded(frame, after_kind, 0..=256)?;
++                (DesignOccurrenceAttributeValue::Text(text), after_text)
++            }
++            _ => return None,
++        };
++        attributes.push(DesignOccurrenceAttribute {
++            name: name.to_owned(),
++            value,
++        });
++        at = after_value;
++    }
++    Some((attributes, at))
++}
++
+ /// Read stored local occurrence attributes and its occurrence key.
+ fn attributed_component_occurrence(
+     bytes: &[u8],
+@@ -568,8 +611,7 @@ fn attributed_component_occurrence(
+ ) -> Option<DesignComponentOccurrence> {
+     use crate::records::feature::assembly_features::{
+         DesignAttributedOccurrenceFrame, DesignComponentOccurrenceDraft,
+-        DesignComponentOccurrencePlacement, DesignOccurrenceAttribute,
+-        DesignOccurrenceAttributeValue,
++        DesignComponentOccurrencePlacement,
+     };
+     let (class_tag, after_tag) = lp_ascii_filtered_view(bytes, start, 3..=3, u8::is_ascii_digit)?;
+     let record_index = View::u32_le_at(bytes, after_tag)?;
+@@ -584,7 +626,7 @@ fn attributed_component_occurrence(
+     }
+     let mut reference_end = attributed_prefix::COMPONENT_REFERENCE;
+     let component = component_reference(frame, &mut reference_end)?;
+-    let (discriminator_at, marker_at, count_at, mut at) = if component.1.is_some() {
++    let (discriminator_at, marker_at, count_at, attributes_at) = if component.1.is_some() {
+         (
+             typed_attributed_prefix::PATH_DISCRIMINATOR,
+             typed_attributed_prefix::ATTRIBUTES_MARKER,
+@@ -609,33 +651,10 @@ fn attributed_component_occurrence(
+     }
+     let component_record_index = component.0;
+     let count = View::u32_le_at(frame, count_at)?;
+-    if !(1..=MAX_OCCURRENCE_ATTRIBUTES).contains(&count) {
++    if count == 0 {
+         return None;
+     }
+-    let mut attributes = Vec::new();
+-    for _ in 0..count {
+-        let (name, after_name) =
+-            lp_ascii_filtered_view(frame, at, 1..=64, u8::is_ascii_alphanumeric)?;
+-        let (kind, after_kind) =
+-            lp_ascii_filtered_view(frame, after_name, 1..=64, u8::is_ascii_alphanumeric)?;
+-        let (value, after_value) = match kind {
+-            "IntrinsicMetaTypebool" => match frame.get(after_kind)? {
+-                0 => (DesignOccurrenceAttributeValue::Bool(false), after_kind + 1),
+-                1 => (DesignOccurrenceAttributeValue::Bool(true), after_kind + 1),
+-                _ => return None,
+-            },
+-            "IntrinsicMetaTypeHString" => {
+-                let (text, after_text) = lp_utf16_bounded(frame, after_kind, 0..=256)?;
+-                (DesignOccurrenceAttributeValue::Text(text), after_text)
+-            }
+-            _ => return None,
+-        };
+-        attributes.push(DesignOccurrenceAttribute {
+-            name: name.to_owned(),
+-            value,
+-        });
+-        at = after_value;
+-    }
++    let (attributes, at) = occurrence_attributes(frame, attributes_at, count)?;
+     let ordinal_prefix = View::u16_le_at(frame, at)?;
+     let ordinal = std::num::NonZeroU32::new(View::u32_le_at(frame, at + 2)?)?;
+     let path_discriminator = View::u32_le_at(frame, discriminator_at)?;
+@@ -758,16 +777,32 @@ fn leading_flag_component_occurrence(
+         || frame.get(component_end..leading_prefix::PATH_DISCRIMINATOR)? != [0; 2]
+         || frame.get(leading_prefix::ATTRIBUTES_MARKER)
+             != Some(&leading_prefix::ATTRIBUTES_MARKER_VALUE)
+-        || View::u32_le_at(frame, leading_prefix::ATTRIBUTE_COUNT)?
+-            != leading_prefix::ATTRIBUTE_COUNT_VALUE
+     {
+         return None;
+     }
++    // The counted attribute run, empty in the fixed-size frames, shifts every
++    // later field.
++    let (attributes, attributes_end) = occurrence_attributes(
++        frame,
++        leading_prefix::ORDINAL_PREFIX,
++        View::u32_le_at(frame, leading_prefix::ATTRIBUTE_COUNT)?,
++    )?;
++    let shifted = |offset: usize| offset - leading_prefix::ORDINAL_PREFIX + attributes_end;
+     let component_record_index = View::u64_le_at(frame, leading_prefix::COMPONENT_REFERENCE + 1)?;
+-    let ordinal_prefix = View::u16_le_at(frame, leading_prefix::ORDINAL_PREFIX)?;
+-    let ordinal =
+-        std::num::NonZeroU32::new(View::u32_le_at(frame, leading_prefix::OCCURRENCE_ORDINAL)?)?;
+-    let identity_flag = *frame.get(leading_prefix::IDENTITY_FLAG)?;
++    let ordinal_prefix = View::u16_le_at(frame, shifted(leading_prefix::ORDINAL_PREFIX))?;
++    let ordinal = std::num::NonZeroU32::new(View::u32_le_at(
++        frame,
++        shifted(leading_prefix::OCCURRENCE_ORDINAL),
++    )?)?;
++    // A flagless identity frame stores its identity flag only in the body,
++    // and its carrier GUID length takes the flag's place.
++    let flag_at = shifted(leading_prefix::IDENTITY_FLAG);
++    let flagless = !matches!(frame.get(flag_at)?, 0 | 1);
++    let (identity_flag, prefix_end) = if flagless {
++        (1, flag_at)
++    } else {
++        (frame[flag_at], shifted(leading_prefix::LEN))
++    };
+     let (placement, matrix) = match identity_flag {
+         1 if ordinal.get() == 1 => (DesignComponentOccurrencePlacement::Base, None),
+         1 => (
+@@ -775,9 +810,8 @@ fn leading_flag_component_occurrence(
+             None,
+         ),
+         0 => {
+-            let transform =
+-                super::scopes::shared_frames::rigid_transform_at(frame, leading_prefix::LEN)?;
+-            let matrix = frame.get(leading_prefix::LEN..leading_prefix::LEN + MATRIX_BYTES)?;
++            let transform = super::scopes::shared_frames::rigid_transform_at(frame, prefix_end)?;
++            let matrix = frame.get(prefix_end..prefix_end + MATRIX_BYTES)?;
+             (
+                 DesignComponentOccurrencePlacement::Explicit { ordinal, transform },
+                 Some(matrix),
+@@ -785,7 +819,7 @@ fn leading_flag_component_occurrence(
+         }
+         _ => return None,
+     };
+-    let body = leading_prefix::LEN + matrix.map_or(0, <[u8]>::len);
++    let body = prefix_end + matrix.map_or(0, <[u8]>::len);
+     let at = |offset: usize| body + offset;
+     let (component_guid, after_component) =
+         lp_utf16_bounded(frame, at(leading_body::CARRIER_GUID), 36..=36)?;
+@@ -841,6 +875,8 @@ fn leading_flag_component_occurrence(
+             owner_entity,
+         },
+         DesignLeadingFlagOccurrenceFrame {
++            attributes,
++            flagless,
+             ordinal_prefix,
+             record_reference,
+         },
+diff --git a/crates/cadmpeg-codec-f3d/src/design/decode/components/tests/leading_flag.rs b/crates/cadmpeg-codec-f3d/src/design/decode/components/tests/leading_flag.rs
+index 457f47e..2875930 100644
+--- a/crates/cadmpeg-codec-f3d/src/design/decode/components/tests/leading_flag.rs
++++ b/crates/cadmpeg-codec-f3d/src/design/decode/components/tests/leading_flag.rs
+@@ -152,6 +152,78 @@ fn a_leading_flag_frame_with_one_wrong_field_states_no_occurrence() {
+     }
+ }
+ 
++/// The three stored attributes of an occurrence: two flags and an empty time.
++fn attribute_run() -> Vec<u8> {
++    let mut run = Vec::new();
++    for (name, kind, value) in [
++        ("GatedByParent", "IntrinsicMetaTypebool", &[0_u8][..]),
++        ("ResolutionTime", "IntrinsicMetaTypeHString", &[0, 0, 0, 0][..]),
++        ("SelfGated", "IntrinsicMetaTypebool", &[0][..]),
++    ] {
++        for text in [name, kind] {
++            run.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
++            run.extend_from_slice(text.as_bytes());
++        }
++        run.extend_from_slice(value);
++    }
++    run
++}
++
++#[test]
++fn a_leading_flag_frame_can_store_attributes_before_its_ordinal() {
++    for matrix in [false, true] {
++        let extra = if matrix { 128 } else { 0 };
++        let run = attribute_run();
++        let mut bytes = frame(matrix);
++        bytes[40..44].copy_from_slice(&3_u32.to_le_bytes());
++        bytes.splice(44..44, run.iter().copied());
++        let record = parse(&bytes).unwrap();
++        assert_eq!(record.owner_entity, 6);
++        assert_eq!(record.component_guid.as_str(), COMPONENT);
++        assert_eq!(
++            record.transform().map(|transform| transform.offset),
++            matrix.then_some(51 + run.len() as u64)
++        );
++        let wire = serde_json::to_value(&record).unwrap();
++        assert_eq!(wire["component_guid_offset"], 55 + extra + run.len());
++        assert_eq!(wire["occurrence_guid_offset"], 131 + extra + run.len());
++        assert_eq!(wire["owner_entity_offset"], 241 + 2 * extra + run.len());
++        assert_eq!(wire["leading_flag"]["attributes"][1]["name"], "ResolutionTime");
++        let decoded: DesignComponentOccurrence = serde_json::from_value(wire).unwrap();
++        assert_eq!(decoded, record);
++
++        let mut miscounted = bytes.clone();
++        miscounted[40..44].copy_from_slice(&2_u32.to_le_bytes());
++        assert!(parse(&miscounted).is_none());
++    }
++}
++
++#[test]
++fn a_flagless_identity_frame_stores_its_flag_only_in_the_body() {
++    let mut bytes = frame(false);
++    bytes.remove(50);
++    assert_eq!(bytes.len(), 250);
++    let record = parse(&bytes).unwrap();
++    assert_eq!(record.occurrence_ordinal(), 1);
++    assert!(record.transform().is_none());
++    let wire = serde_json::to_value(&record).unwrap();
++    assert_eq!(wire["component_guid_offset"], 54);
++    assert_eq!(wire["occurrence_guid_offset"], 130);
++    assert_eq!(wire["owner_entity_offset"], 240);
++    assert_eq!(wire["leading_flag"]["flagless"], true);
++    let decoded: DesignComponentOccurrence = serde_json::from_value(wire).unwrap();
++    assert_eq!(decoded, record);
++
++    // The body copy is the only flag, and it states identity.
++    let mut placed = bytes.clone();
++    placed[50 + 179] = 0;
++    assert!(parse(&placed).is_none());
++    // A fixed frame keeps its flag in the wire form's default.
++    let wire = serde_json::to_value(parse(&frame(false)).unwrap()).unwrap();
++    assert!(wire["leading_flag"].get("flagless").is_none());
++    assert!(wire["leading_flag"].get("attributes").is_none());
++}
++
+ /// Component types each registering one entity at one offset.
+ fn registered(rows: &[(&str, u32, u64)]) -> crate::metastream::MetaStream {
+     use crate::metastream::{MetaStream, RecordIndexEntry};
+diff --git a/crates/cadmpeg-codec-f3d/src/layout.rs b/crates/cadmpeg-codec-f3d/src/layout.rs
+index 9f005ec..4c328ef 100644
+--- a/crates/cadmpeg-codec-f3d/src/layout.rs
++++ b/crates/cadmpeg-codec-f3d/src/layout.rs
+@@ -5915,8 +5915,6 @@ pub(crate) mod local_component_occurrence_leading_flag_prefix {
+     pub(crate) const ATTRIBUTES_MARKER_VALUE: u8 = 1;
+     /// Offset of `attribute_count` (`u32`, little-endian). Spec §3.1.
+     pub(crate) const ATTRIBUTE_COUNT: usize = 40;
+-    /// Stated value of `attribute_count` (`u32`). Spec §3.1.
+-    pub(crate) const ATTRIBUTE_COUNT_VALUE: u32 = 0x0000_0000;
+     /// Offset of `ordinal_prefix` (`u16`, little-endian). Spec §3.1.
+     pub(crate) const ORDINAL_PREFIX: usize = 44;
+     /// Offset of `occurrence_ordinal` (`u32`, little-endian). Spec §3.1.
+diff --git a/crates/cadmpeg-codec-f3d/src/records/feature/assembly_features.rs b/crates/cadmpeg-codec-f3d/src/records/feature/assembly_features.rs
+index 2aa6f9c..9e17723 100644
+--- a/crates/cadmpeg-codec-f3d/src/records/feature/assembly_features.rs
++++ b/crates/cadmpeg-codec-f3d/src/records/feature/assembly_features.rs
+@@ -292,8 +292,9 @@ pub(crate) enum DesignComponentOccurrenceFrame {
+     /// The attributed frame, with a counted attribute run and an occurrence
+     /// key that can be a decimal key.
+     Attributed(Box<DesignAttributedOccurrenceFrame>),
+-    /// The 251-byte identity frame or the 507-byte matrix frame whose
+-    /// identity flag and matrix precede the GUIDs.
++    /// The frame whose identity flag and matrix precede the GUIDs: 251 or
++    /// 507 bytes plus its attribute run, or 250 bytes for a flagless
++    /// identity frame.
+     LeadingFlag(DesignLeadingFlagOccurrenceFrame),
+ }
+ 
+@@ -301,12 +302,28 @@ pub(crate) enum DesignComponentOccurrenceFrame {
+ /// not have.
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub(crate) struct DesignLeadingFlagOccurrenceFrame {
++    /// The counted attribute run, in record order.
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub(crate) attributes: Vec<DesignOccurrenceAttribute>,
++    /// Whether the identity frame stores its flag only in the body.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub(crate) flagless: bool,
+     /// The little-endian u16 before the occurrence ordinal.
+     pub(crate) ordinal_prefix: u16,
+     /// Marked same-segment record reference after the occurrence GUID.
+     pub(crate) record_reference: u64,
+ }
+ 
++impl DesignLeadingFlagOccurrenceFrame {
++    /// Stored bytes of the attribute run.
++    fn attributes_len(&self) -> u64 {
++        self.attributes
++            .iter()
++            .map(DesignOccurrenceAttribute::stored_len)
++            .sum()
++    }
++}
++
+ /// The members of an attributed occurrence frame that the fixed frames do not
+ /// have, and its field offsets.
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+@@ -340,6 +357,19 @@ pub(crate) struct DesignOccurrenceAttribute {
+     pub(crate) value: DesignOccurrenceAttributeValue,
+ }
+ 
++impl DesignOccurrenceAttribute {
++    /// Stored bytes of the LP-ASCII name, the LP-ASCII type, and the value.
++    fn stored_len(&self) -> u64 {
++        let (kind, value) = match &self.value {
++            DesignOccurrenceAttributeValue::Bool(_) => ("IntrinsicMetaTypebool", 1),
++            DesignOccurrenceAttributeValue::Text(text) => {
++                ("IntrinsicMetaTypeHString", 4 + 2 * text.encode_utf16().count())
++            }
++        };
++        cadmpeg_core::decode::u64_from_index(4 + self.name.len() + 4 + kind.len() + value)
++    }
++}
++
+ /// The value of an occurrence attribute, by its stored type.
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ #[serde(rename_all = "snake_case", tag = "type", content = "value")]
+@@ -561,7 +591,7 @@ impl DesignComponentOccurrence {
+     ) -> Result<Self, String> {
+         draft
+             .byte_offset
+-            .checked_add(Self::leading_flag_owner_offset(&draft.placement))
++            .checked_add(Self::leading_flag_owner_offset(&draft.placement, &frame))
+             .ok_or("component occurrence offsets overflow byte_offset")?;
+         let mut record = Self::try_new(draft)?;
+         record.frame = DesignComponentOccurrenceFrame::LeadingFlag(frame);
+@@ -577,15 +607,28 @@ impl DesignComponentOccurrence {
+         }
+     }
+ 
+-    /// Offset of the leading-flag body after the prefix and the first matrix.
+-    fn leading_flag_body_offset(placement: &DesignComponentOccurrencePlacement) -> u64 {
++    /// Offset of the leading-flag prefix end, after the attribute run and
++    /// the leading identity flag.
++    fn leading_flag_prefix_end(frame: &DesignLeadingFlagOccurrenceFrame) -> u64 {
+         cadmpeg_core::decode::u64_from_index(
+             crate::layout::local_component_occurrence_leading_flag_prefix::LEN,
+-        ) + Self::leading_flag_matrix_bytes(placement)
++        ) + frame.attributes_len()
++            - u64::from(frame.flagless)
+     }
+ 
+-    fn leading_flag_owner_offset(placement: &DesignComponentOccurrencePlacement) -> u64 {
+-        Self::leading_flag_body_offset(placement)
++    /// Offset of the leading-flag body after the prefix and the first matrix.
++    fn leading_flag_body_offset(
++        placement: &DesignComponentOccurrencePlacement,
++        frame: &DesignLeadingFlagOccurrenceFrame,
++    ) -> u64 {
++        Self::leading_flag_prefix_end(frame) + Self::leading_flag_matrix_bytes(placement)
++    }
++
++    fn leading_flag_owner_offset(
++        placement: &DesignComponentOccurrencePlacement,
++        frame: &DesignLeadingFlagOccurrenceFrame,
++    ) -> u64 {
++        Self::leading_flag_body_offset(placement, frame)
+             + cadmpeg_core::decode::u64_from_index(
+                 crate::layout::local_component_occurrence_leading_flag_body::LEN
+                     + crate::layout::local_component_occurrence_identity_tail::OWNER_ENTITY,
+@@ -659,9 +702,9 @@ impl DesignComponentOccurrence {
+                     )
+             }
+             DesignComponentOccurrenceFrame::Attributed(frame) => frame.component_guid_offset,
+-            DesignComponentOccurrenceFrame::LeadingFlag(_) => {
++            DesignComponentOccurrenceFrame::LeadingFlag(frame) => {
+                 self.byte_offset
+-                    + Self::leading_flag_body_offset(&self.placement)
++                    + Self::leading_flag_body_offset(&self.placement, frame)
+                     + cadmpeg_core::decode::u64_from_index(
+                         crate::layout::local_component_occurrence_leading_flag_body::CARRIER_GUID
+                             + 4,
+@@ -684,9 +727,9 @@ impl DesignComponentOccurrence {
+                     )
+             }
+             DesignComponentOccurrenceFrame::Attributed(frame) => frame.occurrence_guid_offset,
+-            DesignComponentOccurrenceFrame::LeadingFlag(_) => {
++            DesignComponentOccurrenceFrame::LeadingFlag(frame) => {
+                 self.byte_offset
+-                    + Self::leading_flag_body_offset(&self.placement)
++                    + Self::leading_flag_body_offset(&self.placement, frame)
+                     + cadmpeg_core::decode::u64_from_index(
+                         crate::layout::local_component_occurrence_leading_flag_body::OCCURRENCE_GUID
+                             + 4,
+@@ -716,8 +759,8 @@ impl DesignComponentOccurrence {
+                 self.byte_offset + Self::typed_owner_offset(&self.placement, *separated)
+             }
+             DesignComponentOccurrenceFrame::Attributed(frame) => frame.owner_entity_offset,
+-            DesignComponentOccurrenceFrame::LeadingFlag(_) => {
+-                self.byte_offset + Self::leading_flag_owner_offset(&self.placement)
++            DesignComponentOccurrenceFrame::LeadingFlag(frame) => {
++                self.byte_offset + Self::leading_flag_owner_offset(&self.placement, frame)
+             }
+         }
+     }
+@@ -760,11 +803,8 @@ impl DesignComponentOccurrence {
+                                 crate::layout::local_component_occurrence_typed_compact_prefix::LEN
+                             })
+                     }
+-                    DesignComponentOccurrenceFrame::LeadingFlag(_) => {
+-                        self.byte_offset
+-                            + cadmpeg_core::decode::u64_from_index(
+-                                crate::layout::local_component_occurrence_leading_flag_prefix::LEN,
+-                            )
++                    DesignComponentOccurrenceFrame::LeadingFlag(frame) => {
++                        self.byte_offset + Self::leading_flag_prefix_end(frame)
+                     }
+                 },
+             }),
+diff --git a/docs/layouts/f3d.md b/docs/layouts/f3d.md
+index d2258d5..bc36cf6 100644
+--- a/docs/layouts/f3d.md
++++ b/docs/layouts/f3d.md
+@@ -5907,9 +5907,9 @@ Parsed by:
+ | 20 | 4 | `path_count` | `u32` | little | spec | u32 path count `1` at offset 20 · value `1` |
+ | 24 | 9 | `component_reference` | `bytes[9]` | little | spec | the marked u64 component-record reference at offset 24 |
+ | 35 | 4 | `path_discriminator` | `u32` | little | spec | the u32 path discriminator at offset 35 |
+-| 39 | 1 | `attributes_marker` | `u8` | little | spec | `u8 1` at offset 39 and u32 count `0` at offset 40 · value `1` |
+-| 40 | 4 | `attribute_count` | `u32` | little | spec | `u8 1` at offset 39 and u32 count `0` at offset 40 · value `0` |
+-| 44 | 2 | `ordinal_prefix` | `u16` | little | spec | The u16 ordinal prefix is at offset 44 |
++| 39 | 1 | `attributes_marker` | `u8` | little | spec | `u8 1` at offset 39 and u32 attribute count at offset 40 · value `1` |
++| 40 | 4 | `attribute_count` | `u32` | little | spec | `u8 1` at offset 39 and u32 attribute count at offset 40 |
++| 44 | 2 | `ordinal_prefix` | `u16` | little | spec | the u16 ordinal prefix is at offset 44 |
+ | 46 | 4 | `occurrence_ordinal` | `u32` | little | spec | the u32 one-based occurrence ordinal is at offset 46 |
+ | 50 | 1 | `identity_flag` | `u8` | little | spec | the identity flag is at offset 50 |
+ 
+diff --git a/docs/layouts/f3d.toml b/docs/layouts/f3d.toml
+index fc1a38f..8028734 100644
+--- a/docs/layouts/f3d.toml
++++ b/docs/layouts/f3d.toml
+@@ -19220,7 +19220,7 @@ name = "attributes_marker"
+ offset = 39
+ type = "u8"
+ source = "spec"
+-anchor = "`u8 1` at offset 39 and u32 count `0` at offset 40"
++anchor = "`u8 1` at offset 39 and u32 attribute count at offset 40"
+ value = 1
+ 
+ [[record.field]]
+@@ -19228,15 +19228,14 @@ name = "attribute_count"
+ offset = 40
+ type = "u32"
+ source = "spec"
+-anchor = "`u8 1` at offset 39 and u32 count `0` at offset 40"
+-value = 0
++anchor = "`u8 1` at offset 39 and u32 attribute count at offset 40"
+ 
+ [[record.field]]
+ name = "ordinal_prefix"
+ offset = 44
+ type = "u16"
+ source = "spec"
+-anchor = "The u16 ordinal prefix is at offset 44"
++anchor = "the u16 ordinal prefix is at offset 44"
+ 
+ [[record.field]]
+ name = "occurrence_ordinal"
+diff --git a/docs/formats/f3d.md b/docs/formats/f3d.md
+index 1e10aaa..c800ae6 100644
+--- a/docs/formats/f3d.md
++++ b/docs/formats/f3d.md
+@@ -902,7 +902,7 @@ Typed local component occurrences use local references with inline type GUIDs. T
+ 
+ An attributed local component occurrence carries a counted attribute run and an occurrence key. After the indexed header it stores u32 `0`, an empty LP-ASCII instance name, `u8 1`, u32 path count `1`, the marked u64 component-record reference at offset 24, two zero bytes, the u32 path discriminator at offset 35, `u8 1`, and a u32 attribute count at offset 40. Each attribute is an LP-ASCII name, an LP-ASCII type, and a value: type `IntrinsicMetaTypebool` stores one byte `0` or `1`, and type `IntrinsicMetaTypeHString` stores an LP-UTF16 string. Two bytes, the u32 one-based occurrence ordinal, the LP-UTF16 carrier GUID, and the LP-UTF16 occurrence key follow. The path discriminator is independent of the later occurrence ordinal. The occurrence key is a 36-code-unit GUID or a positive decimal key such as `34`, and it is unique within a Design stream. A standard cross-segment reference, one zero byte, the repeated marked component-record reference, and two zero bytes follow. The reference retains its u64 key-record index and u32 segment index. The identity flag, the matrix when the flag is `0`, nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame as in the fixed frames. An attributed identity frame can retain a positive occurrence ordinal greater than one without storing a matrix. The fixed attributed prefix is in [the layout tables](../layouts/f3d.md). A path record can name a local occurrence by its decimal occurrence key in place of its occurrence GUID.
+ 
+-A leading-flag local component occurrence stores its identity flag before its GUIDs. The primary record index selects the carrier, and the Component occurrence-placement type row (§1.4) registers its record. After the indexed header, the frame stores u32 `0`, an empty LP-ASCII instance name, `u8 1` at offset 19, u32 path count `1` at offset 20, the marked u64 component-record reference at offset 24, two zero bytes, and the u32 path discriminator at offset 35. An empty attribute list follows: `u8 1` at offset 39 and u32 count `0` at offset 40. The u16 ordinal prefix is at offset 44, the u32 one-based occurrence ordinal is at offset 46, and the identity flag is at offset 50. Flag `0` stores a row-major orthonormal local-to-container matrix at offset 51, with translation in centimetres. The body follows the flag or the matrix: the LP-UTF16 carrier GUID, the LP-UTF16 occurrence GUID, a marked same-segment record reference, one zero byte, `u8 1`, u32 path count `1`, one zero byte, the repeated marked component-record reference, two zero bytes, and a copy of the identity flag. A matrix frame then stores the same matrix a second time. Nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame. The identity frame is 251 bytes and the matrix frame is 507 bytes. Flag `1` with ordinal one is the base placement, and flag `0` is the matrix placement. As in the fixed frames, a class-`256` carrier uses the matrix frame only for an ordinal greater than one. The prefix and body layouts are in [the layout tables](../layouts/f3d.md).
++A leading-flag local component occurrence stores its identity flag before its GUIDs. The primary record index selects the carrier, and the Component occurrence-placement type row (§1.4) registers its record. After the indexed header, the frame stores u32 `0`, an empty LP-ASCII instance name, `u8 1` at offset 19, u32 path count `1` at offset 20, the marked u64 component-record reference at offset 24, two zero bytes, and the u32 path discriminator at offset 35. An attribute list follows: `u8 1` at offset 39 and u32 attribute count at offset 40, then the attributes in the attributed-form encoding. With an empty list, the u16 ordinal prefix is at offset 44, the u32 one-based occurrence ordinal is at offset 46, and the identity flag is at offset 50. Flag `0` stores a row-major orthonormal local-to-container matrix at offset 51, with translation in centimetres. A nonempty list moves every later field by its byte length. The body follows the flag or the matrix: the LP-UTF16 carrier GUID, the LP-UTF16 occurrence GUID, a marked same-segment record reference, one zero byte, `u8 1`, u32 path count `1`, one zero byte, the repeated marked component-record reference, two zero bytes, and a copy of the identity flag. A matrix frame then stores the same matrix a second time. Nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame. With an empty attribute list, the identity frame is 251 bytes and the matrix frame is 507 bytes. Flag `1` with ordinal one is the base placement, and flag `0` is the matrix placement. As in the fixed frames, a class-`256` carrier uses the matrix frame only for an ordinal greater than one. A flagless identity frame omits the identity flag after the ordinal: the carrier GUID follows the ordinal directly, and the flag copy `1` in the body is its only identity flag. With an empty attribute list it is 250 bytes. The prefix and body layouts are in [the layout tables](../layouts/f3d.md).
+ 
+ An attributed local component occurrence also permits a typed component reference. Its path discriminator follows the complete reference at offset 75, the attribute marker is at offset 79, and the attribute count is at offset 80. The attribute run starts at offset 84. The repeated definition reference has the same target and inline type as the first. The closing owner reference is typed and carries inline type GUID `904F885E-D859-4755-A7EF-6EBED8732FAD`. The remaining members have the same order and meanings as in the untyped attributed form.
+ 

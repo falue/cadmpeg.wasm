@@ -1,0 +1,227 @@
+diff --git a/crates/cadmpeg-codec-step/src/export.rs b/crates/cadmpeg-codec-step/src/export.rs
+index eac0bc3..06f5575 100644
+--- a/crates/cadmpeg-codec-step/src/export.rs
++++ b/crates/cadmpeg-codec-step/src/export.rs
+@@ -1412,6 +1412,16 @@ impl<'a> Builder<'a> {
+             .filter_map(|occurrence| occurrence_products.get(&occurrence.id))
+             .collect::<BTreeSet<_>>();
+         let root_product_count = root_products.len();
++        let mut unnamed_roots = products.iter().filter(|product| {
++            root_products.contains(&product.id)
++                && product.label.is_none()
++                && product.source_name.is_none()
++                && product.part_number.is_none()
++        });
++        let unnamed_root = unnamed_roots
++            .next()
++            .filter(|_| unnamed_roots.next().is_none())
++            .map(|product| &product.id);
+         let root_product = match root_products.len() {
+             1 => root_products.pop_first(),
+             _ => None,
+@@ -1493,10 +1503,7 @@ impl<'a> Builder<'a> {
+                         .as_deref()
+                         .or(product.source_name.as_deref())
+                         .or(product.part_number.as_deref())
+-                        .or_else(|| {
+-                            (!assembly_root && root_product == Some(&product.id))
+-                                .then_some(self.model_name)
+-                        });
++                        .or_else(|| (unnamed_root == Some(&product.id)).then_some(self.model_name));
+                     (product.id.as_str(), name)
+                 })
+                 .collect::<Vec<_>>(),
+diff --git a/crates/cadmpeg-codec-step/src/options.rs b/crates/cadmpeg-codec-step/src/options.rs
+index 709992e..6b5e848 100644
+--- a/crates/cadmpeg-codec-step/src/options.rs
++++ b/crates/cadmpeg-codec-step/src/options.rs
+@@ -23,9 +23,10 @@ pub struct StepWriteOptions {
+     /// The model name: the `FILE_NAME` name field and the root `PRODUCT` name.
+     ///
+     /// Without product definitions, the single `PRODUCT` id and name use this
+-    /// value. With product definitions, it names the definition of the sole
+-    /// root occurrence when that definition has no label, source name, or part
+-    /// number. It names a part only when that part is the sole root definition.
++    /// value. With product definitions, it names the product that places the
++    /// root occurrences, and the root-occurrence definition that alone has no
++    /// label, source name, or part number. A document name in the encode input
++    /// replaces it.
+     pub product_name: String,
+     /// The sole entry in the `FILE_NAME` author list.
+     pub author: String,
+diff --git a/crates/cadmpeg-codec-step/src/writer/target.rs b/crates/cadmpeg-codec-step/src/writer/target.rs
+index 45b63b2..16d415a 100644
+--- a/crates/cadmpeg-codec-step/src/writer/target.rs
++++ b/crates/cadmpeg-codec-step/src/writer/target.rs
+@@ -9,7 +9,7 @@ use cadmpeg_ir::codec::write::{
+ 
+ use crate::export::write_step_outcome;
+ use crate::loss::StepLossCode;
+-use crate::options::StepSchema;
++use crate::options::{StepSchema, StepWriteOptions};
+ use crate::StepCodec;
+ 
+ /// Why this writer cannot reproduce a source schema outside
+@@ -36,11 +36,17 @@ pub(crate) fn plan(
+     })?;
+     let mut bytes = Vec::new();
+     let recovered = cadmpeg_ir::codec::write::edge_recovery::recover_edge_curves(input.ir)?;
++    let options = StepWriteOptions {
++        product_name: input
++            .name
++            .map_or_else(|| codec.options.product_name.clone(), str::to_owned),
++        ..codec.options.clone()
++    };
+     let outcome = write_step_outcome(
+         &recovered.document,
+         &mut bytes,
+         schema,
+-        &codec.options,
++        &options,
+         recovered.recovered_edges,
+     )?;
+     let mut losses = outcome.losses;
+diff --git a/crates/cadmpeg-codec-step/src/writer/tests/products.rs b/crates/cadmpeg-codec-step/src/writer/tests/products.rs
+index b092a7b..fd5dfa0 100644
+--- a/crates/cadmpeg-codec-step/src/writer/tests/products.rs
++++ b/crates/cadmpeg-codec-step/src/writer/tests/products.rs
+@@ -3,6 +3,7 @@
+ 
+ use std::io::Cursor;
+ 
++use cadmpeg_ir::codec::write::{target::TargetRequest, EncodeInput, Encoder};
+ use cadmpeg_ir::codec::{Codec, DecodeOptions};
+ use cadmpeg_ir::examples::unit_cube;
+ use cadmpeg_ir::CadIr;
+@@ -380,6 +381,52 @@ fn writer_preserves_distinct_identity_root_occurrences() {
+     );
+ }
+ 
++#[test]
++fn writer_names_the_sole_unnamed_root_definition_and_takes_the_document_name() {
++    let mut ir = unit_cube().expect("unit cube fixture is admitted");
++    let body = ir.model.bodies[0].id.clone();
++    let mut second = unnamed_definition("test:model:product-definition#second", Vec::new());
++    second.label = Some("Second part".into());
++    ir.model.product_definitions = vec![
++        unnamed_definition("test:model:product-definition#first", vec![body]),
++        second,
++    ];
++    ir.model.occurrences = vec![
++        named_root_occurrence(
++            "test:model:occurrence#first-root",
++            "test:model:product-definition#first",
++            "first-root",
++        ),
++        named_root_occurrence(
++            "test:model:occurrence#second-root",
++            "test:model:product-definition#second",
++            "second-root",
++        ),
++    ];
++    assert_eq!(
++        record_names(&write_named(&ir, "Assembly model"), "PRODUCT"),
++        ["Assembly model", "Second part", "Assembly model"]
++    );
++
++    let plan = StepCodec::default()
++        .plan(
++            EncodeInput {
++                name: Some("Hasi"),
++                ..EncodeInput::new(&ir, None)
++            },
++            TargetRequest::Explicit(StepSchema::Ap242Edition3.descriptor().id.as_str()),
++        )
++        .expect("plan named document");
++    let mut output = Vec::new();
++    plan.write_to(&mut output).expect("write named document");
++    let step = String::from_utf8(output).expect("STEP text");
++    assert!(step.contains("FILE_NAME('Hasi',"), "{step}");
++    assert_eq!(
++        record_names(&step, "PRODUCT"),
++        ["Hasi", "Second part", "Hasi"]
++    );
++}
++
+ #[test]
+ fn writer_does_not_add_a_synthetic_root_for_reused_roots_with_children() {
+     use cadmpeg_ir::products::{OccurrenceParent, PrototypeReference};
+diff --git a/crates/cadmpeg-ir/src/codec/write/mod.rs b/crates/cadmpeg-ir/src/codec/write/mod.rs
+index bad7885..8c8553e 100644
+--- a/crates/cadmpeg-ir/src/codec/write/mod.rs
++++ b/crates/cadmpeg-ir/src/codec/write/mod.rs
+@@ -192,6 +192,8 @@ pub struct EncodeInput<'a> {
+     /// The source of the files that external assets of the document name,
+     /// for an encoder that writes their content into its output.
+     pub assets: Option<&'a dyn Companions>,
++    /// The document name, for an encoder that names the document.
++    pub name: Option<&'a str>,
+ }
+ 
+ impl<'a> EncodeInput<'a> {
+@@ -202,6 +204,7 @@ impl<'a> EncodeInput<'a> {
+             ir,
+             fidelity,
+             assets: None,
++            name: None,
+         }
+     }
+ 
+diff --git a/crates/cadmpeg/src/application/transcoder.rs b/crates/cadmpeg/src/application/transcoder.rs
+index 44e9ccd..39f4cf8 100644
+--- a/crates/cadmpeg/src/application/transcoder.rs
++++ b/crates/cadmpeg/src/application/transcoder.rs
+@@ -346,6 +346,8 @@ pub(crate) struct PreparedConversion {
+     selection: TargetSelection,
+     /// The files that external assets of the document name.
+     assets: loader::companions::Directory,
++    /// The source file stem, which names the document.
++    name: Option<String>,
+     destination: ResolvedDestination,
+     loss_policy: LossPolicy,
+     allow_errors: bool,
+@@ -383,6 +385,11 @@ pub(crate) fn prepare(
+         encoder: target.encoder,
+         selection: target.selection,
+         assets: loader::companions::Directory::beside(source.path),
++        name: source
++            .path
++            .file_stem()
++            .and_then(std::ffi::OsStr::to_str)
++            .map(str::to_owned),
+         destination,
+         loss_policy: policy.losses,
+         allow_errors: policy.allow_errors,
+@@ -399,7 +406,11 @@ impl PreparedConversion {
+         // reflects this build's feature set. Restating it here would be a
+         // second vocabulary to keep in step with the first.
+         let plan = match self.encoder.plan(
+-            EncodeInput::new(&self.document.ir, self.document.fidelity()).with_assets(&self.assets),
++            EncodeInput {
++                name: self.name.as_deref(),
++                ..EncodeInput::new(&self.document.ir, self.document.fidelity())
++                    .with_assets(&self.assets)
++            },
+             self.selection.request(),
+         ) {
+             Ok(plan) => plan,
+diff --git a/crates/cadmpeg/src/application/transcoder/tests.rs b/crates/cadmpeg/src/application/transcoder/tests.rs
+index 1da6cd5..0cf93df 100644
+--- a/crates/cadmpeg/src/application/transcoder/tests.rs
++++ b/crates/cadmpeg/src/application/transcoder/tests.rs
+@@ -93,6 +93,7 @@ fn prepared(
+         encoder,
+         selection: TargetSelection::new(format, None),
+         assets: crate::loader::companions::Directory::beside(Path::new("input")),
++        name: None,
+         destination: ResolvedDestination::Stdout,
+         loss_policy,
+         allow_errors: false,
+@@ -676,6 +677,7 @@ fn a_design_arena_error_blocks_a_freecad_round_trip() {
+             encoder: target.encoder,
+             selection: target.selection,
+             assets: crate::loader::companions::Directory::beside(Path::new("input")),
++            name: None,
+             destination: ResolvedDestination::Stdout,
+             loss_policy: LossPolicy::Allow,
+             allow_errors: false,

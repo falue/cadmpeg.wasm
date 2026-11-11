@@ -1,0 +1,74 @@
+diff --git a/crates/cadmpeg-codec-step/src/export.rs b/crates/cadmpeg-codec-step/src/export.rs
+index 3b12cd8..eac0bc3 100644
+--- a/crates/cadmpeg-codec-step/src/export.rs
++++ b/crates/cadmpeg-codec-step/src/export.rs
+@@ -2040,14 +2040,20 @@ impl<'a> Builder<'a> {
+                     format!("region {} was written as a surface model because its solid shells are incomplete or open", region.id),
+                 );
+             }
++            let name = string(
++                self.bodies
++                    .get(region.body.as_str())
++                    .and_then(|body| body.name.as_deref())
++                    .unwrap_or(""),
++            );
+             let item = if !solid {
+                 self.emitter.emit(
+                     "SHELL_BASED_SURFACE_MODEL",
+-                    &format!("'',{}", refs(&shell_refs)),
++                    &format!("{name},{}", refs(&shell_refs)),
+                 )
+             } else if voids.is_empty() {
+                 self.emitter
+-                    .emit("MANIFOLD_SOLID_BREP", &format!("'',{first_shell}"))
++                    .emit("MANIFOLD_SOLID_BREP", &format!("{name},{first_shell}"))
+             } else {
+                 let void_refs: Vec<Ref> = voids
+                     .iter()
+@@ -2058,7 +2064,7 @@ impl<'a> Builder<'a> {
+                     .collect();
+                 self.emitter.emit(
+                     "BREP_WITH_VOIDS",
+-                    &format!("'',{first_shell},{}", refs(&void_refs)),
++                    &format!("{name},{first_shell},{}", refs(&void_refs)),
+                 )
+             };
+             if solid {
+diff --git a/crates/cadmpeg-codec-step/src/writer/tests/products.rs b/crates/cadmpeg-codec-step/src/writer/tests/products.rs
+index 3426736..b092a7b 100644
+--- a/crates/cadmpeg-codec-step/src/writer/tests/products.rs
++++ b/crates/cadmpeg-codec-step/src/writer/tests/products.rs
+@@ -196,6 +196,33 @@ fn writer_names_the_model_product_from_options_on_both_paths() {
+     assert_eq!(record_names(&step, "PRODUCT"), ["Bracket model"]);
+ }
+ 
++#[test]
++fn writer_names_each_solid_after_its_body_on_both_paths() {
++    let solid_names = |step: &str| {
++        step.lines()
++            .filter_map(|line| line.split_once(" = MANIFOLD_SOLID_BREP('"))
++            .filter_map(|(_, rest)| rest.split('\'').next().map(str::to_owned))
++            .collect::<Vec<_>>()
++    };
++    let mut ir = unit_cube().expect("unit cube fixture is admitted");
++    ir.model.bodies[0].name = Some("Body 1".into());
++    assert_eq!(solid_names(&write_named(&ir, "Bracket model")), ["Body 1"]);
++
++    ir.model.product_definitions = vec![unnamed_definition(
++        "test:model:product-definition#part-0",
++        vec![ir.model.bodies[0].id.clone()],
++    )];
++    ir.model.occurrences = vec![unnamed_occurrence(
++        "test:model:occurrence#root",
++        "test:model:product-definition#part-0",
++        None,
++    )];
++    assert_eq!(solid_names(&write_named(&ir, "Bracket model")), ["Body 1"]);
++
++    ir.model.bodies[0].name = None;
++    assert_eq!(solid_names(&write_named(&ir, "Bracket model")), [""]);
++}
++
+ #[test]
+ fn writer_names_a_product_by_its_part_number() {
+     let mut ir = unit_cube().expect("unit cube fixture is admitted");

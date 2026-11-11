@@ -1,0 +1,64 @@
+diff --git a/crates/cadmpeg-codec-f3d/src/manifest.rs b/crates/cadmpeg-codec-f3d/src/manifest.rs
+index c3d2fe4..1249d86 100644
+--- a/crates/cadmpeg-codec-f3d/src/manifest.rs
++++ b/crates/cadmpeg-codec-f3d/src/manifest.rs
+@@ -496,9 +496,13 @@ fn parse_asset_tail_at<'a>(cursor: &mut Cursor<'a>) -> Result<Vec<Utf16View<'a>>
+                 ));
+             }
+             if !cursor.exhausted() {
+-                expect_lineage_urn(cursor.utf16("top-level manifest lineage URN")?)?;
+-                if cursor.view.unread() == lineage_suffix::BYTES_VALUE {
+-                    cursor.view.seek_to_end();
++                // The offline-save marker or the lineage URN.
++                let lineage = cursor.utf16("top-level manifest lineage URN")?;
++                if !lineage.chars().eq("NA_OFFLINESAVE".chars()) {
++                    expect_lineage_urn(lineage)?;
++                    if cursor.view.unread() == lineage_suffix::BYTES_VALUE {
++                        cursor.view.seek_to_end();
++                    }
+                 }
+             }
+         }
+diff --git a/crates/cadmpeg-codec-f3d/src/manifest/tests.rs b/crates/cadmpeg-codec-f3d/src/manifest/tests.rs
+index d719820..f13ccea 100644
+--- a/crates/cadmpeg-codec-f3d/src/manifest/tests.rs
++++ b/crates/cadmpeg-codec-f3d/src/manifest/tests.rs
+@@ -299,6 +299,17 @@ fn top_level_manifest_accepts_the_offline_save_marker() {
+     assert!(parse_top_level(&near).is_err());
+ }
+ 
++#[test]
++fn top_level_manifest_accepts_the_offline_save_marker_after_a_display_name() {
++    let manifest =
++        parse_top_level(&terminal_manifest(0, Some("Assembly"), "NA_OFFLINESAVE")).unwrap();
++    assert_eq!(manifest.asset_folder_bases, ["Design Base"]);
++    assert!(manifest.diagnostics.is_empty());
++    for marker in ["NA_EXPORT", "NA_OFFLINE"] {
++        assert!(parse_top_level(&terminal_manifest(0, Some("Assembly"), marker)).is_err());
++    }
++}
++
+ #[test]
+ fn top_level_manifest_reports_invalid_lineage_urn() {
+     let original = encode_top_level(DESIGN_GUID, &["Design Base"]).unwrap();
+@@ -682,6 +693,7 @@ fn top_level_manifest_lineage_suffix_requires_display_name_and_lineage() {
+         terminal_manifest(1, None, "NA_OFFLINESAVE"),
+         terminal_manifest(0, Some(""), "urn:synthetic:lineage"),
+         terminal_manifest(0, Some("Assembly"), "synthetic:lineage"),
++        terminal_manifest(0, Some("Assembly"), "NA_OFFLINESAVE"),
+         terminal_manifest(0, None, "Assembly"),
+     ] {
+         bytes.extend_from_slice(&[72, 0, 65, 0, 65, 0, 72, 0, 65, 0]);
+diff --git a/docs/formats/f3d.md b/docs/formats/f3d.md
+index 1e10aaa..c800ae6 100644
+--- a/docs/formats/f3d.md
++++ b/docs/formats/f3d.md
+@@ -258,6 +258,8 @@ terminal:
+   or u8 0, nonempty LP-UTF16 document_display_name,
+            optional (nonempty LP-UTF16 lineage_urn beginning `urn:`,
+                      optional lineage_suffix), end of file
++  or u8 0, nonempty LP-UTF16 document_display_name,
++           LP-UTF16 `NA_OFFLINESAVE`, end of file
+   or u8 1, end of file
+   or u8 1, LP-UTF16 `NA_EXPORT`, end of file
+   or u8 1, LP-UTF16 `NA_OFFLINESAVE`, end of file

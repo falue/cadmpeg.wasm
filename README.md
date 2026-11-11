@@ -36,6 +36,12 @@ node test/parity.mjs upstream/target/dist/cadmpeg   # byte comparison with a nat
 
 Update cadmpeg with `git -C upstream pull` (after `git -C upstream checkout .` to drop the patches), then `./build.sh`.
 
-`patches/wasm32-measure-allowance.patch` is the one change to cadmpeg: its measurement work allowance (`items × 2²²`) overflows a 32-bit `usize` at about 1000 faces and edges; it saturates there.
+Changes to cadmpeg, one patch each in `patches/`. When a patch no longer applies after an update, check whether upstream fixed the same thing; if so, delete the patch and its line here.
 
-Output matches a native build byte for byte, except for last-digit float differences (about 1e-16) in some large files, from the platform math library.
+- `wasm32-measure-allowance.patch`: the measurement work allowance (`items × 2²²`) overflows a 32-bit `usize` at about 1000 faces and edges; it saturates there.
+- `f3d-manifest-offline-save-after-display-name.patch`: an F3D manifest may end with a display name followed by `NA_OFFLINESAVE` in place of the lineage URN (Fusion writes this for an XREF made from an imported STEP). Without it, such an f3z member is not read at all.
+- `f3d-leading-flag-occurrence-forms.patch`: two more forms of the local component-occurrence record: a counted attribute run (`GatedByParent`, `ResolutionTime`, `SelfGated`), and an identity record without the leading identity flag. Without it, these components have no occurrences, so their bodies stay at the component origin and the STEP export has no product tree.
+- `step-root-named-after-input-file.patch`: `convert` passes the input file name (without extension) to the encoder; the STEP writer uses it in place of `cadmpeg_model` for `FILE_NAME`, the top product, and the root component when that is the only unnamed root (Fusion stores no name for its root component).
+- `step-solid-names.patch`: the STEP writer names each `MANIFOLD_SOLID_BREP` / `BREP_WITH_VOIDS` / `SHELL_BASED_SURFACE_MODEL` after its body.
+
+The patches also update cadmpeg's spec (`docs/formats/f3d.md`), layout table and tests. Output matches a native build byte for byte, except for last-digit float differences (about 1e-16) in some large files, from the platform math library.
