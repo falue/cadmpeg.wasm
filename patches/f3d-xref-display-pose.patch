@@ -1,0 +1,604 @@
+diff --git a/crates/cadmpeg-codec-f3d/src/decode.rs b/crates/cadmpeg-codec-f3d/src/decode.rs
+index bbe2006..6fa9cb7 100644
+--- a/crates/cadmpeg-codec-f3d/src/decode.rs
++++ b/crates/cadmpeg-codec-f3d/src/decode.rs
+@@ -3054,8 +3054,14 @@ impl<'a> F3dDecodeSession<'a> {
+             &prereqs.design_types,
+         )?;
+         if let Some(table) = prereqs.xref_table() {
+-            let external =
+-                crate::xref::project_occurrences(table, &local_sources, &local.occurrences)?;
++            // The scene's losses are reported when the scene is collected.
++            let display = crate::scene::rows(self.ctx, scan, &mut Vec::new())?;
++            let external = crate::xref::project_occurrences(
++                table,
++                &local_sources,
++                &local.occurrences,
++                &display,
++            )?;
+             self.ir.model.occurrences.extend(external.occurrences);
+             self.report.losses.extend(external.losses);
+         }
+@@ -4224,7 +4230,7 @@ fn report_xref_placement_failures(report: &mut DecodeBody, table: &crate::xref::
+             format_args!("external-reference placements were not inferred from Design streams without a paired MetaStream type table and record index"),
+         );
+     }
+-    for failure in &table.placement_failures {
++    for (_, failure) in &table.placement_failures {
+         let target = table
+             .references
+             .iter()
+diff --git a/crates/cadmpeg-codec-f3d/src/design/components.rs b/crates/cadmpeg-codec-f3d/src/design/components.rs
+index 63f5313..2b5ac7a 100644
+--- a/crates/cadmpeg-codec-f3d/src/design/components.rs
++++ b/crates/cadmpeg-codec-f3d/src/design/components.rs
+@@ -2112,7 +2112,8 @@ mod tests {
+                 .unwrap()
+                 .occurrence_guid = Some(external_key.to_owned().try_into().unwrap());
+             let projection =
+-                crate::xref::project_occurrences(&table, &sources, &local.occurrences).unwrap();
++                crate::xref::project_occurrences(&table, &sources, &local.occurrences, &[])
++                    .unwrap();
+             assert!(local.losses.is_empty());
+             assert!(projection.losses.is_empty());
+             assert_eq!(projection.occurrences.len(), count);
+@@ -2175,7 +2176,7 @@ mod tests {
+                 sources.limits.max_entities =
+                     cadmpeg_core::decode::u64_from_index(local.occurrences.len()) + 1;
+                 assert!(matches!(
+-                    crate::xref::project_occurrences(&external_owner_table(COMPONENT_ROOT), &sources, &local.occurrences),
++                    crate::xref::project_occurrences(&external_owner_table(COMPONENT_ROOT), &sources, &local.occurrences, &[]),
+                     Err(cadmpeg_core::CodecError::ResourceLimit(limit)) if limit.operation == "expand F3D external occurrences"
+                 ));
+             }
+@@ -2220,7 +2221,8 @@ mod tests {
+                             transform: Some(rows.try_into().unwrap()),
+                         });
+                 }
+-                let projection = crate::xref::project_occurrences(&table, &sources, &[]).unwrap();
++                let projection =
++                    crate::xref::project_occurrences(&table, &sources, &[], &[]).unwrap();
+                 assert_eq!(projection.occurrences.len(), 1);
+                 assert_eq!(projection.occurrences[0].parent, OccurrenceParent::Root {});
+                 assert_eq!(
+@@ -3461,7 +3463,7 @@ mod tests {
+             root_ordinal_start: 0,
+             limits: cadmpeg_core::decode::ResourceLimits::default(),
+         };
+-        let base = crate::xref::project_occurrences(&table, &sources, &[])
++        let base = crate::xref::project_occurrences(&table, &sources, &[], &[])
+             .unwrap()
+             .occurrences
+             .remove(0);
+diff --git a/crates/cadmpeg-codec-f3d/src/design/components/tests/owners.rs b/crates/cadmpeg-codec-f3d/src/design/components/tests/owners.rs
+index 74e525e..cf74208 100644
+--- a/crates/cadmpeg-codec-f3d/src/design/components/tests/owners.rs
++++ b/crates/cadmpeg-codec-f3d/src/design/components/tests/owners.rs
+@@ -34,6 +34,7 @@ fn an_identity_owner_carrier_places_external_members_when_body_projection_is_def
+         &external_owner_table(COMPONENT_ROOT),
+         &sources,
+         &local.occurrences,
++        &[],
+     )
+     .unwrap();
+     assert!(projection.losses.is_empty());
+@@ -66,9 +67,13 @@ fn a_unique_owner_chain_composes_and_unresolved_owners_keep_the_root_placement()
+             root_ordinal_start: 0,
+             limits: cadmpeg_core::decode::ResourceLimits::default(),
+         };
+-        let projection =
+-            crate::xref::project_occurrences(&external_owner_table(COMPONENT_ROOT), &sources, &[])
+-                .unwrap();
++        let projection = crate::xref::project_occurrences(
++            &external_owner_table(COMPONENT_ROOT),
++            &sources,
++            &[],
++            &[],
++        )
++        .unwrap();
+         if case == "unique" {
+             assert!(projection.losses.is_empty());
+             assert_eq!(projection.occurrences.len(), 1);
+diff --git a/crates/cadmpeg-codec-f3d/src/loss.rs b/crates/cadmpeg-codec-f3d/src/loss.rs
+index 9324d37..0fa9a38 100644
+--- a/crates/cadmpeg-codec-f3d/src/loss.rs
++++ b/crates/cadmpeg-codec-f3d/src/loss.rs
+@@ -450,6 +450,9 @@ pub(crate) enum F3dLossCode {
+     XrefOccurrenceUnplaced,
+     /// An external reference keeps the identity fallback without placement proof.
+     XrefPlacementIdentityAssumed,
++    /// A root external occurrence with an undecoded placement takes its saved
++    /// display pose.
++    XrefPlacementDisplayPose,
+     /// Legacy placement identities remain in their complete native frames.
+     XrefPlacementMetadataNative,
+     /// A legacy placement role has no containing reference-table entry.
+@@ -806,6 +809,7 @@ impl F3dLossCode {
+         Self::XrefPlacementUndecoded,
+         Self::XrefOccurrenceUnplaced,
+         Self::XrefPlacementIdentityAssumed,
++        Self::XrefPlacementDisplayPose,
+         Self::XrefPlacementMetadataNative,
+         Self::XrefPlacementRoleUnbound,
+         Self::XrefPlacementCurrentPose,
+@@ -1132,6 +1136,7 @@ impl F3dLossCode {
+             Self::XrefPlacementUndecoded => "xref.placement-undecoded",
+             Self::XrefOccurrenceUnplaced => "xref.occurrence-unplaced",
+             Self::XrefPlacementIdentityAssumed => "xref.placement-identity-assumed",
++            Self::XrefPlacementDisplayPose => "xref.placement-display-pose",
+             Self::XrefPlacementMetadataNative => "xref.placement-metadata-native",
+             Self::XrefPlacementRoleUnbound => "xref.placement-role-unbound",
+             Self::XrefPlacementCurrentPose => "xref.placement-current-pose",
+@@ -1440,6 +1445,7 @@ impl F3dLossCode {
+             | Self::XrefPlacementUndecoded
+             | Self::XrefOccurrenceUnplaced
+             | Self::XrefPlacementIdentityAssumed
++            | Self::XrefPlacementDisplayPose
+             | Self::XrefPlacementRoleUnbound
+             | Self::XrefCurrentPoseAmbiguous
+             | Self::LocalOccurrenceCurrentPoseAmbiguous
+@@ -1541,6 +1547,7 @@ impl F3dLossCode {
+             | Self::XrefPlacementUndecoded
+             | Self::XrefOccurrenceUnplaced
+             | Self::XrefPlacementIdentityAssumed
++            | Self::XrefPlacementDisplayPose
+             | Self::XrefPlacementRoleUnbound
+             | Self::XrefPlacementMetadataMissing
+             | Self::XrefPlacementSuperseded
+@@ -2011,6 +2018,7 @@ mod tests {
+                 "xref.placement-undecoded",
+                 "xref.occurrence-unplaced",
+                 "xref.placement-identity-assumed",
++                "xref.placement-display-pose",
+                 "xref.placement-metadata-native",
+                 "xref.placement-role-unbound",
+                 "xref.placement-current-pose",
+diff --git a/crates/cadmpeg-codec-f3d/src/scene.rs b/crates/cadmpeg-codec-f3d/src/scene.rs
+index 35aeea2..f2e1e97 100644
+--- a/crates/cadmpeg-codec-f3d/src/scene.rs
++++ b/crates/cadmpeg-codec-f3d/src/scene.rs
+@@ -287,6 +287,31 @@ fn read(
+     Ok(rows)
+ }
+ 
++/// The design asset's saved display rows, unbound.
++pub(crate) fn rows(
++    ctx: &DecodeContext<'_>,
++    scan: &ContainerScan<'_>,
++    losses: &mut Vec<LossNote>,
++) -> Result<Vec<DisplayPose>, CodecError> {
++    let Some(folder) = scan.design_asset_folder() else {
++        return Ok(Vec::new());
++    };
++    let stream = format!("{folder}/OGS.BlobFolder/OGS/DefaultScene/world");
++    match scan.entry_view(&stream) {
++        Some(view) => read(ctx, view, &stream, losses),
++        None => Ok(Vec::new()),
++    }
++}
++
++/// The millimetre transform of the unique untagged row at `path`.
++pub(crate) fn pose_at(rows: &[DisplayPose], path: &[u64]) -> Option<[[f64; 4]; 4]> {
++    let mut matches = rows
++        .iter()
++        .filter(|row| row.tagged_from.is_none() && row.path.0 == path);
++    let row = matches.next()?;
++    matches.next().is_none().then(|| row.transform.into())
++}
++
+ pub(crate) fn collect(
+     ctx: &DecodeContext<'_>,
+     scan: &ContainerScan<'_>,
+@@ -296,13 +321,7 @@ pub(crate) fn collect(
+     if ctx.container_only() {
+         return Ok(false);
+     }
+-    let mut rows = Vec::new();
+-    if let Some(folder) = scan.design_asset_folder() {
+-        let stream = format!("{folder}/OGS.BlobFolder/OGS/DefaultScene/world");
+-        if let Some(view) = scan.entry_view(&stream) {
+-            rows = read(ctx, view, &stream, losses)?;
+-        }
+-    }
++    let rows = rows(ctx, scan, losses)?;
+     let present = !rows.is_empty();
+     ir.native
+         .namespace_mut("f3d")
+diff --git a/crates/cadmpeg-codec-f3d/src/xref.rs b/crates/cadmpeg-codec-f3d/src/xref.rs
+index cfe67d6..dc22213 100644
+--- a/crates/cadmpeg-codec-f3d/src/xref.rs
++++ b/crates/cadmpeg-codec-f3d/src/xref.rs
+@@ -63,8 +63,9 @@ pub(crate) struct XrefTable {
+     pub(crate) references: Vec<XrefReference>,
+     pub(crate) derived_references: Vec<DerivedReference>,
+     pub(crate) unplaced_references: Vec<String>,
+-    /// Type-admitted placements that do not close under their generation grammar.
+-    pub(crate) placement_failures: Vec<OccurrencePlacementFailure>,
++    /// Type-admitted placements that do not close under their generation grammar,
++    /// with their stream.
++    pub(crate) placement_failures: Vec<(String, OccurrencePlacementFailure)>,
+     pub(crate) unbound_legacy_placements: Vec<OccurrencePlacementFailure>,
+     /// Placements named by two or more component-path carriers, as
+     /// `(placement record, carrier records)`; they keep their placement matrix.
+@@ -495,6 +496,7 @@ pub(crate) fn project_occurrences(
+     table: &XrefTable,
+     sources: &crate::design::components::LocalComponentSources<'_>,
+     local: &[Occurrence],
++    display: &[crate::scene::DisplayPose],
+ ) -> Result<ExternalOccurrenceProjection, CodecError> {
+     use crate::loss::F3dLossCode;
+     use std::collections::BTreeMap;
+@@ -566,6 +568,16 @@ pub(crate) fn project_occurrences(
+                 )));
+                 continue;
+             }
++            if let Some(transform) = display_pose(table, sources, reference, display) {
++                let mut occurrence = occurrence;
++                occurrence.transform = transform;
++                projection.losses.push(F3dLossCode::XrefPlacementDisplayPose.note(format!(
++                    "xref {}: member {} occurrence placement did not decode; it takes the saved display pose of its document-root path",
++                    reference.id, reference.relative_path.as_str()
++                )));
++                projection.occurrences.push(occurrence);
++                continue;
++            }
+             projection.losses.push(F3dLossCode::XrefPlacementIdentityAssumed.note(format!(
+                 "xref {}: member {} occurrence placement did not decode; it was placed at the identity without proof",
+                 reference.id, reference.relative_path.as_str()
+@@ -680,6 +692,29 @@ pub(crate) fn project_occurrences(
+     Ok(projection)
+ }
+ 
++/// The saved display pose at `[root component, carrier]` for the unique
++/// undecoded placement carrier of `reference`.
++fn display_pose(
++    table: &XrefTable,
++    sources: &crate::design::components::LocalComponentSources<'_>,
++    reference: &XrefReference,
++    display: &[crate::scene::DisplayPose],
++) -> Option<cadmpeg_ir::transform::Transform> {
++    let mut failures = table.placement_failures.iter().filter(|(_, failure)| {
++        failure
++            .link_names
++            .iter()
++            .any(|role| role == reference.neutron_role.as_str())
++    });
++    let (stream, failure) = failures.next()?;
++    if failures.next().is_some() {
++        return None;
++    }
++    let root = sources.components.get(stream)?.root_component?;
++    let pose = crate::scene::pose_at(display, &[root, failure.carrier_record_index?])?;
++    cadmpeg_ir::transform::Transform::affine([pose[0], pose[1], pose[2]])
++}
++
+ fn has_decoded_placement(reference: &XrefReference) -> bool {
+     reference.placement_source.is_some()
+         || reference.transform.is_some()
+@@ -896,7 +931,11 @@ fn bind_occurrences(
+     let mut expanded = Vec::new();
+     let placement_failures = streams
+         .iter()
+-        .flat_map(|(_, failures, _, _)| failures.iter().cloned())
++        .flat_map(|(_, failures, stream, _)| {
++            failures
++                .iter()
++                .map(|failure| (stream.clone(), failure.clone()))
++        })
+         .collect();
+     let unbound_legacy_placements = streams
+         .iter()
+@@ -1355,7 +1394,11 @@ fn occurrence_placements_with_failures(
+         } else {
+             let link_names = occurrence_path(body)
+                 .map(|(names, _)| names)
+-                .or_else(|| legacy_occurrence_role(body).map(|role| vec![role.to_string()]))
++                .or_else(|| {
++                    legacy_occurrence_role(body)
++                        .or_else(|| legacy_attributed_role(body))
++                        .map(|role| vec![role.to_string()])
++                })
+                 .unwrap_or_default();
+             failures.push(OccurrencePlacementFailure {
+                 carrier_record_index: View::u64_le_at(body, 7),
+@@ -1518,9 +1561,16 @@ struct LegacyAttributedPlacementDetails<'a> {
+     transform: Option<[[f64; 4]; 4]>,
+ }
+ 
+-fn legacy_attributed_placement_details(
+-    body: &[u8],
+-) -> Option<LegacyAttributedPlacementDetails<'_>> {
++/// The role of an attributed legacy placement whose members do not close,
++/// read from its fixed closing identity tail.
++fn legacy_attributed_role(body: &[u8]) -> Option<Utf16View<'_>> {
++    legacy_attributed_target(body)?;
++    let tail = body.get(body.len().checked_sub(legacy_identity_tail::LEN)?..)?;
++    legacy_attributed_identity_tail(tail).map(|(role, _)| role)
++}
++
++/// The validated 88-byte prefix's component target.
++fn legacy_attributed_target(body: &[u8]) -> Option<LegacyOccurrenceTarget<'_>> {
+     let tag_units = usize::try_from(legacy_prefix::CLASS_TAG_LENGTH_VALUE).ok()?;
+     let (tag, _) = lp_ascii_strict(body, legacy_prefix::CLASS_TAG_LENGTH, tag_units..=tag_units)?;
+     if !tag.as_bytes().iter().all(u8::is_ascii_digit)
+@@ -1543,6 +1593,13 @@ fn legacy_attributed_placement_details(
+         return None;
+     }
+     View::u32_le_at(body, legacy_prefix::PATH_DISCRIMINATOR)?;
++    Some(first)
++}
++
++fn legacy_attributed_placement_details(
++    body: &[u8],
++) -> Option<LegacyAttributedPlacementDetails<'_>> {
++    let first = legacy_attributed_target(body)?;
+     let attributes = body.get(legacy_prefix::LEN..)?;
+     let attributes_len = legacy_placement_attributes_len(attributes)?;
+     let members_start = legacy_prefix::LEN + attributes_len;
+@@ -1602,6 +1659,27 @@ fn legacy_attributed_placement_details(
+         ),
+         _ => return None,
+     };
++    let (role, owner) = legacy_attributed_identity_tail(tail)?;
++    let tracking_units = usize::try_from(legacy_members::TRACKING_GUID_LENGTH_VALUE).ok()?;
++    Some(LegacyAttributedPlacementDetails {
++        carrier_record_index: View::u64_le_at(body, legacy_prefix::ENTITY)?,
++        occurrence_guid: lp_utf16_bounded_view(
++            members,
++            legacy_members::TRACKING_GUID_LENGTH,
++            tracking_units..=tracking_units,
++        )?
++        .0
++        .to_string()
++        .try_into()
++        .ok()?,
++        owner,
++        role,
++        transform,
++    })
++}
++
++/// The role and owner entity of the 92-byte closing identity tail.
++fn legacy_attributed_identity_tail(tail: &[u8]) -> Option<(Utf16View<'_>, u64)> {
+     if tail.len() != legacy_identity_tail::LEN
+         || View::u32_le_at(tail, legacy_identity_tail::ZERO)? != legacy_identity_tail::ZERO_VALUE
+         || tail.get(legacy_identity_tail::SEPARATOR) != Some(&legacy_identity_tail::SEPARATOR_VALUE)
+@@ -1625,25 +1703,7 @@ fn legacy_attributed_placement_details(
+     else {
+         return None;
+     };
+-    if owner == 0 || owner_end != tail.len() {
+-        return None;
+-    }
+-    let tracking_units = usize::try_from(legacy_members::TRACKING_GUID_LENGTH_VALUE).ok()?;
+-    Some(LegacyAttributedPlacementDetails {
+-        carrier_record_index: View::u64_le_at(body, legacy_prefix::ENTITY)?,
+-        occurrence_guid: lp_utf16_bounded_view(
+-            members,
+-            legacy_members::TRACKING_GUID_LENGTH,
+-            tracking_units..=tracking_units,
+-        )?
+-        .0
+-        .to_string()
+-        .try_into()
+-        .ok()?,
+-        owner,
+-        role,
+-        transform,
+-    })
++    (owner != 0 && owner_end == tail.len()).then_some((role, owner))
+ }
+ 
+ fn legacy_placement_attributes_len(body: &[u8]) -> Option<usize> {
+diff --git a/crates/cadmpeg-codec-f3d/src/xref/tests.rs b/crates/cadmpeg-codec-f3d/src/xref/tests.rs
+index 9162954..f9d616b 100644
+--- a/crates/cadmpeg-codec-f3d/src/xref/tests.rs
++++ b/crates/cadmpeg-codec-f3d/src/xref/tests.rs
+@@ -951,6 +951,32 @@ fn legacy_typed_placements_decode_identity_and_matrix_forms() {
+     );
+ }
+ 
++#[test]
++fn leading_flag_attributed_placement_keeps_its_role_for_an_undecoded_carrier() {
++    use crate::layout::legacy_attributed_external_placement_attributes as attributes;
++    use crate::layout::legacy_attributed_external_placement_prefix as prefix;
++
++    let role = "aaaabbbb-cccc-dddd-eeee-ffff00001111";
++    let matrix = [
++        [1.0, 0.0, 0.0, -16.0],
++        [0.0, 1.0, 0.0, 98.0],
++        [0.0, 0.0, 1.0, 0.0],
++        [0.0, 0.0, 0.0, 1.0],
++    ];
++    let mut frame =
++        crate::test_support::legacy_attributed_external_placement(role, true, Some(matrix));
++    let mut leading = vec![0];
++    leading.extend(matrix.into_iter().flatten().flat_map(f64::to_le_bytes));
++    let ordinal_end = prefix::LEN + attributes::LEN + 6;
++    frame.splice(ordinal_end..ordinal_end, leading);
++
++    assert_eq!(super::occurrence_placement(&frame, None).unwrap(), None);
++    assert_eq!(
++        super::legacy_attributed_role(&frame).map(|role| role.to_string()),
++        Some(role.to_owned())
++    );
++}
++
+ #[test]
+ fn attributed_legacy_external_placements_keep_the_transform_owner_and_source() {
+     use crate::test_support::legacy_attributed_external_placement;
+@@ -1676,6 +1702,7 @@ fn redirections_leaf_form_parses_empty_object_references() {
+ 
+ mod schema;
+ 
++mod display_pose;
+ mod document_admission;
+ 
+ #[test]
+diff --git a/crates/cadmpeg-codec-f3d/src/xref/tests/display_pose.rs b/crates/cadmpeg-codec-f3d/src/xref/tests/display_pose.rs
+new file mode 100644
+index 0000000..441e4e6
+--- /dev/null
++++ b/crates/cadmpeg-codec-f3d/src/xref/tests/display_pose.rs
+@@ -0,0 +1,135 @@
++use std::collections::BTreeMap;
++
++use crate::design::decode::components::StreamComponents;
++use crate::loss::F3dLossCode;
++use crate::records::xref::XrefReference;
++use crate::scene::{DisplayPose, SceneBinding};
++use crate::xref::{OccurrencePlacementFailure, XrefTable};
++
++const STREAM: &str = "f3d:Design/BulkStream.dat";
++const ROLE: &str = "external-role";
++const ROOT_COMPONENT: u64 = 3;
++const CARRIER: u64 = 212;
++/// Quarter turns that map X to -Z and Z to -Y, with a millimetre translation.
++const POSE: [[f64; 4]; 4] = [
++    [0.0, 1.0, 0.0, 996.5],
++    [0.0, 0.0, -1.0, 26.0],
++    [-1.0, 0.0, 0.0, 190.25],
++    [0.0, 0.0, 0.0, 1.0],
++];
++
++fn unplaced_table(failures: usize) -> XrefTable {
++    XrefTable {
++        references: vec![XrefReference {
++            id: "f3d:xref:reference#0".to_owned(),
++            ordinal: 0,
++            occurrence_ordinal: 0,
++            placement_source: None,
++            from: "root.f3d".to_owned().try_into().unwrap(),
++            relative_path: "part.f3d".to_owned().try_into().unwrap(),
++            neutron_role: ROLE.to_owned().try_into().unwrap(),
++            neutron_data: String::new(),
++            transform: None,
++            current_pose: None,
++            operation_pose: None,
++            contained_poses: Vec::new(),
++            owned_poses: Vec::new(),
++        }],
++        placement_failures: (0..failures)
++            .map(|_| {
++                (
++                    STREAM.to_owned(),
++                    OccurrencePlacementFailure {
++                        carrier_record_index: Some(CARRIER),
++                        link_names: vec![ROLE.to_owned()],
++                    },
++                )
++            })
++            .collect(),
++        ..Default::default()
++    }
++}
++
++fn row(path: Vec<u64>, tagged_from: Option<u64>) -> DisplayPose {
++    DisplayPose {
++        id: format!("f3d:world:display-pose#{}", path[1]),
++        stream: "world".to_owned(),
++        byte_offset: 0,
++        path: path.try_into().unwrap(),
++        tagged_from,
++        transform: POSE.try_into().unwrap(),
++        binding: SceneBinding::Unbound {},
++    }
++}
++
++fn project(
++    table: &XrefTable,
++    display: &[DisplayPose],
++) -> super::super::ExternalOccurrenceProjection {
++    let components = BTreeMap::from([(
++        STREAM.to_owned(),
++        StreamComponents {
++            root_component: Some(ROOT_COMPONENT),
++            ..Default::default()
++        },
++    )]);
++    let sources = crate::design::components::LocalComponentSources {
++        scopes: &[],
++        occurrences: &[],
++        paths: &[],
++        components: &components,
++        body_bindings: &[],
++        bodies: None,
++        hidden_bodies: None,
++        root_ordinal_start: 1,
++        limits: cadmpeg_core::decode::ResourceLimits::default(),
++    };
++    super::super::project_occurrences(table, &sources, &[], display).unwrap()
++}
++
++fn codes(
++    projection: &super::super::ExternalOccurrenceProjection,
++) -> Vec<cadmpeg_ir::report::loss::LossKind> {
++    projection
++        .losses
++        .iter()
++        .map(|loss| loss.code.clone())
++        .collect()
++}
++
++#[test]
++fn undecoded_root_placement_takes_the_unique_display_pose_of_its_carrier() {
++    let display = [
++        row(vec![ROOT_COMPONENT, CARRIER], None),
++        row(vec![ROOT_COMPONENT, 4411], None),
++        row(vec![ROOT_COMPONENT, 7, 9, CARRIER], Some(2)),
++    ];
++    let projection = project(&unplaced_table(1), &display);
++    assert_eq!(projection.occurrences.len(), 1);
++    assert_eq!(projection.occurrences[0].transform.rows(), POSE);
++    assert_eq!(
++        codes(&projection),
++        [F3dLossCode::XrefPlacementDisplayPose.kind()]
++    );
++}
++
++#[test]
++fn undecoded_placement_without_a_unique_pose_or_carrier_keeps_the_identity() {
++    let pose = row(vec![ROOT_COMPONENT, CARRIER], None);
++    for (failures, display) in [
++        (1, vec![]),
++        (1, vec![pose.clone(), pose.clone()]),
++        (2, vec![pose.clone()]),
++        (1, vec![row(vec![ROOT_COMPONENT + 1, CARRIER], None)]),
++    ] {
++        let projection = project(&unplaced_table(failures), &display);
++        assert_eq!(
++            projection.occurrences[0].transform.rows(),
++            super::super::IDENTITY_ROWS
++        );
++        assert_eq!(
++            codes(&projection),
++            [F3dLossCode::XrefPlacementIdentityAssumed.kind()]
++        );
++    }
++}
+diff --git a/docs/formats/f3d-open-items.md b/docs/formats/f3d-open-items.md
+index ea826ae..35f245b 100644
+--- a/docs/formats/f3d-open-items.md
++++ b/docs/formats/f3d-open-items.md
+@@ -1559,7 +1559,7 @@ when the operation transition carries no candidate for the group members?
+ 
+ **Question.** How does the closing reference of a legacy placement carrier identify its owner, including a 531-byte carrier whose closing target differs from `4`? Which saved state supplies the owner frame, and how do the instance key and metadata UUIDs bind its six-name envelope?
+ 
+-**Known.** The 403-byte identity and 531-byte matrix envelopes in §1.4 close with target value `4`. One local archive has eight XREF rows with undecoded placements; five target members decode, and five role-matched 531-byte carriers have nonidentity matrices and other non-null closing targets. Two public OSII Mini archives each have 43 refused version-2 Component placement carriers: two 404-byte identity spans and 41 532-byte matrix spans. The plain prefix has an extra byte, with values `0` and `1`, before its metadata count. Its closing references select five local owners. Each of the 82 matrices has a byte-identical copy in another form in its Design stream. Each root also has seven unadmitted 234-byte local identity carriers. Two local component paths retain translated frames while the corresponding local carriers store identity; one translation is `-3.6` cm on Z. One public Meanwell assembly has eight refused version-2 six-name matrix carriers: one 740-byte span and seven 744-byte spans. Each matrix also occurs in a CommonData path that names its placement carrier. Each closing owner is the document root. The six stored names are `Appearance`, `Geometry`, `PhysicalMaterial`, `Properties`, `StructureChange`, and `Transform`. These three public roots have zero saved display scenes and zero joint scopes. Their baseline losses are respectively 43, 43, and 8 `xref.placement-undecoded`, and 14, 14, and 5 `xref.placement-identity-assumed`. Multiple carriers share a reference role. In one measured assembly, nine decoded placements share a unique admitted identity owner carrier to the document root; its carrier chain supplies its external children's world frame. The three-property control-1 identity grammar is in §1.4. An undecoded XREF placement in an XREF-only table retains identity and emits `xref.placement-identity-assumed`. In a table with DERIVED rows it stays native and emits `xref.occurrence-unplaced`. A decoded placement with an unresolved owner retains its document-root placement and emits `xref.owner-unresolved`.
++**Known.** The 403-byte identity and 531-byte matrix envelopes in §1.4 close with target value `4`. One local archive has eight XREF rows with undecoded placements; five target members decode, and five role-matched 531-byte carriers have nonidentity matrices and other non-null closing targets. Two public OSII Mini archives each have 43 refused version-2 Component placement carriers: two 404-byte identity spans and 41 532-byte matrix spans. The plain prefix has an extra byte, with values `0` and `1`, before its metadata count. Its closing references select five local owners. Each of the 82 matrices has a byte-identical copy in another form in its Design stream. Each root also has seven unadmitted 234-byte local identity carriers. Two local component paths retain translated frames while the corresponding local carriers store identity; one translation is `-3.6` cm on Z. One public Meanwell assembly has eight refused version-2 six-name matrix carriers: one 740-byte span and seven 744-byte spans. Each matrix also occurs in a CommonData path that names its placement carrier. Each closing owner is the document root. The six stored names are `Appearance`, `Geometry`, `PhysicalMaterial`, `Properties`, `StructureChange`, and `Transform`. These three public roots have zero saved display scenes and zero joint scopes. Their baseline losses are respectively 43, 43, and 8 `xref.placement-undecoded`, and 14, 14, and 5 `xref.placement-identity-assumed`. Multiple carriers share a reference role. In one measured assembly, nine decoded placements share a unique admitted identity owner carrier to the document root; its carrier chain supplies its external children's world frame. The three-property control-1 identity grammar is in §1.4. An undecoded XREF placement in an XREF-only table takes the unique untagged display row at path `[root component, placement carrier]` (§1.1.4) and emits `xref.placement-display-pose`. One local archive has an 809-byte three-property attributed carrier that stores u8 `0` and a 128-byte matrix after its ordinal; its members then close at the shifted offsets, and its 220-byte matrix tail repeats the matrix. That matrix is a translation of `(-16, 98, 0)` cm, and the display row is the exported current pose. Without that row it retains identity and emits `xref.placement-identity-assumed`. In a table with DERIVED rows it stays native and emits `xref.occurrence-unplaced`. A decoded placement with an unresolved owner retains its document-root placement and emits `xref.owner-unresolved`.
+ 
+ **Need.** For a 531-byte carrier with a closing target other than `4`, public saves that vary the closing target and the owner transform separately, with a retained display scene or closing joint for each placement. These saves must show how the closing reference selects the owner and how the owner places the stored matrix in the document frame. For the plain envelope, save a public assembly with two distinct local owners and one asymmetric external child in each. Put owner A at identity and owner B at translation `(11, 13, 17)` cm with a 180-degree rotation about root Z. Put each child at translation `(1, 0, 0)` cm in its owner frame. Save the baseline, translate owner A by `(2, 3, 5)` cm, rotate it by 90 degrees about root Z through its own origin, then move its child by `(7, 0, 0)` cm in the owner frame, with a separate save after each change. Repeat the child below a second instance of its owner. Keep the child fixed while changing the active captured position, and save both positions. Retain a display scene or dimensioned mating geometry for each save. These pairs must distinguish the stored child frame, the owner's current frame, and the selected captured state, and must close the local owner-carrier grammar. For the six-name envelope, make a second public assembly with an asymmetric inserted part, two instances of that part, and an instance below a moved local owner. Save each insertion separately, add controlled copies until the stored instance key gains one decimal digit, change one tracked channel at a time, and save before and after a captured-position change. Add one fixed joint to each instance in separate saves with the poses held fixed, and compare its operand path to the instance key and both metadata UUIDs. Keep all three repeated target references, the counted name run, the instance key, both metadata UUIDs, and the closing owner in the comparison. Require a complete indexed span, registered type and version, occurrence binding, and an independently established owner-relative pose for each admitted form.
+ 
+diff --git a/docs/formats/f3d.md b/docs/formats/f3d.md
+index c800ae6..8c3a6db 100644
+--- a/docs/formats/f3d.md
++++ b/docs/formats/f3d.md
+@@ -376,7 +376,7 @@ The three-property identity form also carries control word `1`. This form stores
+ 
+ The first UUID is auxiliary placement metadata. The second UUID is the source occurrence key. It occupies a key slot in the counted occurrence-key run of same-Design records of type `96CBEA21-17E0-4BCB-BA77-04EA87B47934`, version 4. It can follow the keys of containing occurrences. The occurrence-role GUID binds the placement to the container reference; it is separate from the source occurrence key.
+ 
+-The attributed legacy placement tail is 92 bytes for identity flag `1` and 220 bytes for flag `0`. The matrix form starts with sixteen row-major f64 values. Both tails then store u32 `0`, a 36-code-unit LP-UTF16 occurrence-role GUID, u8 `0`, and an eleven-byte local owner reference with a nonzero target. The owner reference has no inline type GUID. The complete frame is 420 or 548 bytes with the empty attribute block, and 552 or 680 bytes with the three-property block. The fixed members are in [the layout tables](../layouts/f3d.md).
++The attributed legacy placement tail is 92 bytes for identity flag `1` and 220 bytes for flag `0`. The matrix form starts with sixteen row-major f64 values. Both tails then store u32 `0`, a 36-code-unit LP-UTF16 occurrence-role GUID, u8 `0`, and an eleven-byte local owner reference with a nonzero target. The owner reference has no inline type GUID. The complete frame is 420 or 548 bytes with the empty attribute block, and 552 or 680 bytes with the three-property block. A frame with a valid 88-byte prefix whose members do not close keeps the occurrence-role GUID of its final 92 bytes when they form the identity tail; the decoder reports it as an undecoded placement of that role. The fixed members are in [the layout tables](../layouts/f3d.md).
+ 
+ A Component path can replace its terminating zero byte with an inline metadata block: `u8 1`, a u32 property count, then ordered typed properties. Each property has an LP-ASCII name, an LP-ASCII intrinsic type, and the typed value. `IntrinsicMetaTypebool` stores one Boolean byte; `IntrinsicMetaTypeHString` stores an LP-UTF16 string. A block with `GatedByParent = false`, `ResolutionTime = ""`, and `SelfGated = false` serializes those three typed properties in that order. The byte after `GatedByParent`'s Boolean starts the next property; it is not a separate gate selector. The subsequent occurrence-key reference uses the standard cross-segment reference grammar. Its u32 segment index is part of the reference and is not a constant padding value. In an attributed occurrence, the byte after that reference is zero, or it begins an untyped local reference to a nonzero source record. The repeated Component reference follows in both forms. The reference does not change the placement grammar after that point. The source record is read as one registered to type `8ACBA2E5-5A4C-4438-8351-276DE96E6982` in the same Design segment. An occurrence whose source record has no such registration keeps its frame and projects with that reading assumed, and the decoder reports `assembly.local-occurrence-source-unregistered`. The path discriminator and the later occurrence ordinal are independent stored integers. A positive ordinal greater than one can accompany an identity marker; that form stores no matrix and retains its ordinal.
+ 

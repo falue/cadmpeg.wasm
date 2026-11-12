@@ -177,10 +177,10 @@ index c57e780..3081129 100644
              record_reference,
          },
 diff --git a/crates/cadmpeg-codec-f3d/src/design/decode/components/tests/leading_flag.rs b/crates/cadmpeg-codec-f3d/src/design/decode/components/tests/leading_flag.rs
-index 457f47e..2875930 100644
+index 457f47e..cf0a24c 100644
 --- a/crates/cadmpeg-codec-f3d/src/design/decode/components/tests/leading_flag.rs
 +++ b/crates/cadmpeg-codec-f3d/src/design/decode/components/tests/leading_flag.rs
-@@ -152,6 +152,78 @@ fn a_leading_flag_frame_with_one_wrong_field_states_no_occurrence() {
+@@ -152,6 +152,85 @@ fn a_leading_flag_frame_with_one_wrong_field_states_no_occurrence() {
      }
  }
  
@@ -189,7 +189,11 @@ index 457f47e..2875930 100644
 +    let mut run = Vec::new();
 +    for (name, kind, value) in [
 +        ("GatedByParent", "IntrinsicMetaTypebool", &[0_u8][..]),
-+        ("ResolutionTime", "IntrinsicMetaTypeHString", &[0, 0, 0, 0][..]),
++        (
++            "ResolutionTime",
++            "IntrinsicMetaTypeHString",
++            &[0, 0, 0, 0][..],
++        ),
 +        ("SelfGated", "IntrinsicMetaTypebool", &[0][..]),
 +    ] {
 +        for text in [name, kind] {
@@ -220,7 +224,10 @@ index 457f47e..2875930 100644
 +        assert_eq!(wire["component_guid_offset"], 55 + extra + run.len());
 +        assert_eq!(wire["occurrence_guid_offset"], 131 + extra + run.len());
 +        assert_eq!(wire["owner_entity_offset"], 241 + 2 * extra + run.len());
-+        assert_eq!(wire["leading_flag"]["attributes"][1]["name"], "ResolutionTime");
++        assert_eq!(
++            wire["leading_flag"]["attributes"][1]["name"],
++            "ResolutionTime"
++        );
 +        let decoded: DesignComponentOccurrence = serde_json::from_value(wire).unwrap();
 +        assert_eq!(decoded, record);
 +
@@ -273,7 +280,7 @@ index 9f005ec..4c328ef 100644
      pub(crate) const ORDINAL_PREFIX: usize = 44;
      /// Offset of `occurrence_ordinal` (`u32`, little-endian). Spec §3.1.
 diff --git a/crates/cadmpeg-codec-f3d/src/records/feature/assembly_features.rs b/crates/cadmpeg-codec-f3d/src/records/feature/assembly_features.rs
-index 2aa6f9c..9e17723 100644
+index 2aa6f9c..869e650 100644
 --- a/crates/cadmpeg-codec-f3d/src/records/feature/assembly_features.rs
 +++ b/crates/cadmpeg-codec-f3d/src/records/feature/assembly_features.rs
 @@ -292,8 +292,9 @@ pub(crate) enum DesignComponentOccurrenceFrame {
@@ -317,7 +324,7 @@ index 2aa6f9c..9e17723 100644
  /// The members of an attributed occurrence frame that the fixed frames do not
  /// have, and its field offsets.
  #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-@@ -340,6 +357,19 @@ pub(crate) struct DesignOccurrenceAttribute {
+@@ -340,6 +357,20 @@ pub(crate) struct DesignOccurrenceAttribute {
      pub(crate) value: DesignOccurrenceAttributeValue,
  }
  
@@ -326,9 +333,10 @@ index 2aa6f9c..9e17723 100644
 +    fn stored_len(&self) -> u64 {
 +        let (kind, value) = match &self.value {
 +            DesignOccurrenceAttributeValue::Bool(_) => ("IntrinsicMetaTypebool", 1),
-+            DesignOccurrenceAttributeValue::Text(text) => {
-+                ("IntrinsicMetaTypeHString", 4 + 2 * text.encode_utf16().count())
-+            }
++            DesignOccurrenceAttributeValue::Text(text) => (
++                "IntrinsicMetaTypeHString",
++                4 + 2 * text.encode_utf16().count(),
++            ),
 +        };
 +        cadmpeg_core::decode::u64_from_index(4 + self.name.len() + 4 + kind.len() + value)
 +    }
@@ -337,7 +345,7 @@ index 2aa6f9c..9e17723 100644
  /// The value of an occurrence attribute, by its stored type.
  #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
  #[serde(rename_all = "snake_case", tag = "type", content = "value")]
-@@ -561,7 +591,7 @@ impl DesignComponentOccurrence {
+@@ -561,7 +592,7 @@ impl DesignComponentOccurrence {
      ) -> Result<Self, String> {
          draft
              .byte_offset
@@ -346,7 +354,7 @@ index 2aa6f9c..9e17723 100644
              .ok_or("component occurrence offsets overflow byte_offset")?;
          let mut record = Self::try_new(draft)?;
          record.frame = DesignComponentOccurrenceFrame::LeadingFlag(frame);
-@@ -577,15 +607,28 @@ impl DesignComponentOccurrence {
+@@ -577,15 +608,28 @@ impl DesignComponentOccurrence {
          }
      }
  
@@ -380,7 +388,7 @@ index 2aa6f9c..9e17723 100644
              + cadmpeg_core::decode::u64_from_index(
                  crate::layout::local_component_occurrence_leading_flag_body::LEN
                      + crate::layout::local_component_occurrence_identity_tail::OWNER_ENTITY,
-@@ -659,9 +702,9 @@ impl DesignComponentOccurrence {
+@@ -659,9 +703,9 @@ impl DesignComponentOccurrence {
                      )
              }
              DesignComponentOccurrenceFrame::Attributed(frame) => frame.component_guid_offset,
@@ -392,7 +400,7 @@ index 2aa6f9c..9e17723 100644
                      + cadmpeg_core::decode::u64_from_index(
                          crate::layout::local_component_occurrence_leading_flag_body::CARRIER_GUID
                              + 4,
-@@ -684,9 +727,9 @@ impl DesignComponentOccurrence {
+@@ -684,9 +728,9 @@ impl DesignComponentOccurrence {
                      )
              }
              DesignComponentOccurrenceFrame::Attributed(frame) => frame.occurrence_guid_offset,
@@ -404,7 +412,7 @@ index 2aa6f9c..9e17723 100644
                      + cadmpeg_core::decode::u64_from_index(
                          crate::layout::local_component_occurrence_leading_flag_body::OCCURRENCE_GUID
                              + 4,
-@@ -716,8 +759,8 @@ impl DesignComponentOccurrence {
+@@ -716,8 +760,8 @@ impl DesignComponentOccurrence {
                  self.byte_offset + Self::typed_owner_offset(&self.placement, *separated)
              }
              DesignComponentOccurrenceFrame::Attributed(frame) => frame.owner_entity_offset,
@@ -415,7 +423,7 @@ index 2aa6f9c..9e17723 100644
              }
          }
      }
-@@ -760,11 +803,8 @@ impl DesignComponentOccurrence {
+@@ -760,11 +804,8 @@ impl DesignComponentOccurrence {
                                  crate::layout::local_component_occurrence_typed_compact_prefix::LEN
                              })
                      }
@@ -429,6 +437,19 @@ index 2aa6f9c..9e17723 100644
                      }
                  },
              }),
+diff --git a/docs/formats/f3d.md b/docs/formats/f3d.md
+index 1e10aaa..86cc088 100644
+--- a/docs/formats/f3d.md
++++ b/docs/formats/f3d.md
+@@ -902,7 +902,7 @@ Typed local component occurrences use local references with inline type GUIDs. T
+ 
+ An attributed local component occurrence carries a counted attribute run and an occurrence key. After the indexed header it stores u32 `0`, an empty LP-ASCII instance name, `u8 1`, u32 path count `1`, the marked u64 component-record reference at offset 24, two zero bytes, the u32 path discriminator at offset 35, `u8 1`, and a u32 attribute count at offset 40. Each attribute is an LP-ASCII name, an LP-ASCII type, and a value: type `IntrinsicMetaTypebool` stores one byte `0` or `1`, and type `IntrinsicMetaTypeHString` stores an LP-UTF16 string. Two bytes, the u32 one-based occurrence ordinal, the LP-UTF16 carrier GUID, and the LP-UTF16 occurrence key follow. The path discriminator is independent of the later occurrence ordinal. The occurrence key is a 36-code-unit GUID or a positive decimal key such as `34`, and it is unique within a Design stream. A standard cross-segment reference, one zero byte, the repeated marked component-record reference, and two zero bytes follow. The reference retains its u64 key-record index and u32 segment index. The identity flag, the matrix when the flag is `0`, nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame as in the fixed frames. An attributed identity frame can retain a positive occurrence ordinal greater than one without storing a matrix. The fixed attributed prefix is in [the layout tables](../layouts/f3d.md). A path record can name a local occurrence by its decimal occurrence key in place of its occurrence GUID.
+ 
+-A leading-flag local component occurrence stores its identity flag before its GUIDs. The primary record index selects the carrier, and the Component occurrence-placement type row (§1.4) registers its record. After the indexed header, the frame stores u32 `0`, an empty LP-ASCII instance name, `u8 1` at offset 19, u32 path count `1` at offset 20, the marked u64 component-record reference at offset 24, two zero bytes, and the u32 path discriminator at offset 35. An empty attribute list follows: `u8 1` at offset 39 and u32 count `0` at offset 40. The u16 ordinal prefix is at offset 44, the u32 one-based occurrence ordinal is at offset 46, and the identity flag is at offset 50. Flag `0` stores a row-major orthonormal local-to-container matrix at offset 51, with translation in centimetres. The body follows the flag or the matrix: the LP-UTF16 carrier GUID, the LP-UTF16 occurrence GUID, a marked same-segment record reference, one zero byte, `u8 1`, u32 path count `1`, one zero byte, the repeated marked component-record reference, two zero bytes, and a copy of the identity flag. A matrix frame then stores the same matrix a second time. Nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame. The identity frame is 251 bytes and the matrix frame is 507 bytes. Flag `1` with ordinal one is the base placement, and flag `0` is the matrix placement. As in the fixed frames, a class-`256` carrier uses the matrix frame only for an ordinal greater than one. The prefix and body layouts are in [the layout tables](../layouts/f3d.md).
++A leading-flag local component occurrence stores its identity flag before its GUIDs. The primary record index selects the carrier, and the Component occurrence-placement type row (§1.4) registers its record. After the indexed header, the frame stores u32 `0`, an empty LP-ASCII instance name, `u8 1` at offset 19, u32 path count `1` at offset 20, the marked u64 component-record reference at offset 24, two zero bytes, and the u32 path discriminator at offset 35. An attribute list follows: `u8 1` at offset 39 and u32 attribute count at offset 40, then the attributes in the attributed-form encoding. With an empty list, the u16 ordinal prefix is at offset 44, the u32 one-based occurrence ordinal is at offset 46, and the identity flag is at offset 50. Flag `0` stores a row-major orthonormal local-to-container matrix at offset 51, with translation in centimetres. A nonempty list moves every later field by its byte length. The body follows the flag or the matrix: the LP-UTF16 carrier GUID, the LP-UTF16 occurrence GUID, a marked same-segment record reference, one zero byte, `u8 1`, u32 path count `1`, one zero byte, the repeated marked component-record reference, two zero bytes, and a copy of the identity flag. A matrix frame then stores the same matrix a second time. Nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame. With an empty attribute list, the identity frame is 251 bytes and the matrix frame is 507 bytes. Flag `1` with ordinal one is the base placement, and flag `0` is the matrix placement. As in the fixed frames, a class-`256` carrier uses the matrix frame only for an ordinal greater than one. A flagless identity frame omits the identity flag after the ordinal: the carrier GUID follows the ordinal directly, and the flag copy `1` in the body is its only identity flag. With an empty attribute list it is 250 bytes. The prefix and body layouts are in [the layout tables](../layouts/f3d.md).
+ 
+ An attributed local component occurrence also permits a typed component reference. Its path discriminator follows the complete reference at offset 75, the attribute marker is at offset 79, and the attribute count is at offset 80. The attribute run starts at offset 84. The repeated definition reference has the same target and inline type as the first. The closing owner reference is typed and carries inline type GUID `904F885E-D859-4755-A7EF-6EBED8732FAD`. The remaining members have the same order and meanings as in the untyped attributed form.
+ 
 diff --git a/docs/layouts/f3d.md b/docs/layouts/f3d.md
 index d2258d5..bc36cf6 100644
 --- a/docs/layouts/f3d.md
@@ -477,16 +498,3 @@ index fc1a38f..8028734 100644
  
  [[record.field]]
  name = "occurrence_ordinal"
-diff --git a/docs/formats/f3d.md b/docs/formats/f3d.md
-index 1e10aaa..c800ae6 100644
---- a/docs/formats/f3d.md
-+++ b/docs/formats/f3d.md
-@@ -902,7 +902,7 @@ Typed local component occurrences use local references with inline type GUIDs. T
- 
- An attributed local component occurrence carries a counted attribute run and an occurrence key. After the indexed header it stores u32 `0`, an empty LP-ASCII instance name, `u8 1`, u32 path count `1`, the marked u64 component-record reference at offset 24, two zero bytes, the u32 path discriminator at offset 35, `u8 1`, and a u32 attribute count at offset 40. Each attribute is an LP-ASCII name, an LP-ASCII type, and a value: type `IntrinsicMetaTypebool` stores one byte `0` or `1`, and type `IntrinsicMetaTypeHString` stores an LP-UTF16 string. Two bytes, the u32 one-based occurrence ordinal, the LP-UTF16 carrier GUID, and the LP-UTF16 occurrence key follow. The path discriminator is independent of the later occurrence ordinal. The occurrence key is a 36-code-unit GUID or a positive decimal key such as `34`, and it is unique within a Design stream. A standard cross-segment reference, one zero byte, the repeated marked component-record reference, and two zero bytes follow. The reference retains its u64 key-record index and u32 segment index. The identity flag, the matrix when the flag is `0`, nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame as in the fixed frames. An attributed identity frame can retain a positive occurrence ordinal greater than one without storing a matrix. The fixed attributed prefix is in [the layout tables](../layouts/f3d.md). A path record can name a local occurrence by its decimal occurrence key in place of its occurrence GUID.
- 
--A leading-flag local component occurrence stores its identity flag before its GUIDs. The primary record index selects the carrier, and the Component occurrence-placement type row (§1.4) registers its record. After the indexed header, the frame stores u32 `0`, an empty LP-ASCII instance name, `u8 1` at offset 19, u32 path count `1` at offset 20, the marked u64 component-record reference at offset 24, two zero bytes, and the u32 path discriminator at offset 35. An empty attribute list follows: `u8 1` at offset 39 and u32 count `0` at offset 40. The u16 ordinal prefix is at offset 44, the u32 one-based occurrence ordinal is at offset 46, and the identity flag is at offset 50. Flag `0` stores a row-major orthonormal local-to-container matrix at offset 51, with translation in centimetres. The body follows the flag or the matrix: the LP-UTF16 carrier GUID, the LP-UTF16 occurrence GUID, a marked same-segment record reference, one zero byte, `u8 1`, u32 path count `1`, one zero byte, the repeated marked component-record reference, two zero bytes, and a copy of the identity flag. A matrix frame then stores the same matrix a second time. Nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame. The identity frame is 251 bytes and the matrix frame is 507 bytes. Flag `1` with ordinal one is the base placement, and flag `0` is the matrix placement. As in the fixed frames, a class-`256` carrier uses the matrix frame only for an ordinal greater than one. The prefix and body layouts are in [the layout tables](../layouts/f3d.md).
-+A leading-flag local component occurrence stores its identity flag before its GUIDs. The primary record index selects the carrier, and the Component occurrence-placement type row (§1.4) registers its record. After the indexed header, the frame stores u32 `0`, an empty LP-ASCII instance name, `u8 1` at offset 19, u32 path count `1` at offset 20, the marked u64 component-record reference at offset 24, two zero bytes, and the u32 path discriminator at offset 35. An attribute list follows: `u8 1` at offset 39 and u32 attribute count at offset 40, then the attributes in the attributed-form encoding. With an empty list, the u16 ordinal prefix is at offset 44, the u32 one-based occurrence ordinal is at offset 46, and the identity flag is at offset 50. Flag `0` stores a row-major orthonormal local-to-container matrix at offset 51, with translation in centimetres. A nonempty list moves every later field by its byte length. The body follows the flag or the matrix: the LP-UTF16 carrier GUID, the LP-UTF16 occurrence GUID, a marked same-segment record reference, one zero byte, `u8 1`, u32 path count `1`, one zero byte, the repeated marked component-record reference, two zero bytes, and a copy of the identity flag. A matrix frame then stores the same matrix a second time. Nine zero bytes, the marker `u8 1`, the u64 owner entity, and two zero bytes close the frame. With an empty attribute list, the identity frame is 251 bytes and the matrix frame is 507 bytes. Flag `1` with ordinal one is the base placement, and flag `0` is the matrix placement. As in the fixed frames, a class-`256` carrier uses the matrix frame only for an ordinal greater than one. A flagless identity frame omits the identity flag after the ordinal: the carrier GUID follows the ordinal directly, and the flag copy `1` in the body is its only identity flag. With an empty attribute list it is 250 bytes. The prefix and body layouts are in [the layout tables](../layouts/f3d.md).
- 
- An attributed local component occurrence also permits a typed component reference. Its path discriminator follows the complete reference at offset 75, the attribute marker is at offset 79, and the attribute count is at offset 80. The attribute run starts at offset 84. The repeated definition reference has the same target and inline type as the first. The closing owner reference is typed and carries inline type GUID `904F885E-D859-4755-A7EF-6EBED8732FAD`. The remaining members have the same order and meanings as in the untyped attributed form.
- 

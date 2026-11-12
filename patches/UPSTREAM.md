@@ -1,6 +1,6 @@
 # Bug reports for cadmpeg
 
-Drafts, not sent. Each matches one patch in this folder, except the last, which has no fix yet. Byte offsets are from the record start.
+Drafts, not sent. Each matches one patch in this folder. Byte offsets are from the record start.
 
 ## F3D: manifest with a display name and `NA_OFFLINESAVE` is rejected
 
@@ -45,10 +45,14 @@ Patch: `step-root-named-after-input-file.patch`
 
 Fix: `EncodeInput` gains `name: Option<&str>`. The transcoder sets it to the input file stem, and the STEP plan uses it in place of `product_name`. The writer also gives the model name to the root-occurrence definition that is the only unnamed one, also below the synthetic assembly product. Test: `writer_names_the_sole_unnamed_root_definition_and_takes_the_document_name`.
 
-## F3D: XREF occurrence placement is not decoded (no fix)
+## F3D: XREF occurrence placement is not decoded
 
-Same file as the first report. After that fix, the member merges, but `xref.placement-undecoded` ("typed placement carrier Some(212) … did not close under its generation grammar") puts it at the identity (`xref.placement-identity-assumed`). The member's geometry has a far-off origin, so the part lands about 1 m away.
+Patch: `f3d-xref-display-pose.patch`
 
-The occurrence-placement record (class of `CE2913AA-…`, entity 212) carries the attributed run, then `u32 2` and per-element values (≈1−ε, −16, 1, 98 …) in place of a 4×4 matrix. Its frame grammar is not in the spec.
+Same file as the first report. After that fix, the member merges, but `xref.placement-undecoded` ("typed placement carrier Some(212) for roles [] … did not close under its generation grammar") puts it at the identity (`xref.placement-identity-assumed`). The member's geometry has a far-off origin, so the part lands about 1 m away.
 
-Evidence for the pose: `OGS/DefaultScene/world` holds a display pose for path `[root component, 212]`. Every other display pose in the file (8 local occurrences) is bound and equals the world pose decoded from its component-path carrier, in millimetres. Applied to the member, the unbound `[…, 212]` pose gives a box of the part's real size inside the enclosing assembly. Two possible fixes: decode the record's generation grammar, or place an undecoded root-level external occurrence by its unique display pose and charge a loss code for that reading.
+The record (809 bytes) is the attributed legacy placement with the three-property block, plus u8 `0` and a 128-byte matrix after the ordinal. All later members move by 129 bytes, and the 220-byte matrix tail repeats the matrix. The matrix is an identity rotation with translation `(-16, 98, 0)` cm. That is the stale matrix that §1.4 allows. The pose Fusion exports is a different one. Because the members do not close, the role list is empty and the failure binds to no reference.
+
+`OGS/DefaultScene/world` holds an untagged display pose for path `[root component, 212]`. It equals the occurrence transform in Fusion's own STEP export of the file. The other 8 display poses equal their decoded current poses.
+
+Fix: (1) for an attributed frame with a valid 88-byte prefix whose members do not close, read the role from the final 92 bytes when they form the identity tail. (2) An undecoded root-level XREF placement in an XREF-only table takes the unique untagged display pose at `[root component, carrier]` and reports the new `xref.placement-display-pose` (Warning). Without that row the identity fallback stays. Spec and open item DR-248 updated; tests `leading_flag_attributed_placement_keeps_its_role_for_an_undecoded_carrier` and `xref/tests/display_pose.rs`.
